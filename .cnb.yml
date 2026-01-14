@@ -1,0 +1,25 @@
+# CNB 流水线配置 - 磁力链接下载到 OneDrive
+# 通过 api_trigger 事件触发
+
+main:
+  # API 触发事件 - 用于磁力链接下载
+  api_trigger_magnet:
+    - name: magnet-download
+      docker:
+        image: ubuntu:22.04
+      stages:
+        - name: Install dependencies
+          script: |
+            apt-get update
+            apt-get install -y aria2 nodejs npm curl
+            npm install axios
+
+        - name: Get Latest Trackers
+          script: |
+            echo "📡 Fetching latest tracker list..."
+            TRACKERS=$(curl -fsSL https://cf.trackerslist.com/best_aria2.txt || curl -fsSL https://raw.githubusercontent.com/XIU2/TrackersListCollection/master/best_aria2.txt)
+            echo "TRACKERS=$TRACKERS" >> $GITHUB_ENV
+            echo "##[set-output trackers=$TRACKERS]"
+
+        - name: Download and Upload
+          script: node stream_upload.js
