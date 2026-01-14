@@ -3,6 +3,9 @@
 "**":
   api_trigger_download:
     - name: file-download-task
+      runner:
+        tags: cnb:arch:amd64
+        cpus: 1
       docker:
         image: node:20-slim
       stages:
@@ -22,11 +25,11 @@
             echo "=== 系统信息 ==="
             uname -a || true
             echo ""
+            echo "=== CPU 核数 ==="
+            nproc || echo "unknown"
+            echo ""
             echo "=== 磁盘空间 ==="
             df -h / || true
-            echo ""
-            echo "=== 内存 ==="
-            free -h || true
             echo ""
             echo "=== 外网 IP ==="
             curl -fsSL --connect-timeout 5 ifconfig.me 2>/dev/null || echo "无法获取"
@@ -44,14 +47,10 @@
             fi
             echo "  DOWNLOAD_URL: present ✅"
             
-            if [ -n "${TARGET_FOLDER:-}" ]; then
-              echo "  TARGET_FOLDER: ${TARGET_FOLDER} ✅"
-            fi
-            
             if [ -n "${TIMEOUT_MINUTES:-}" ]; then
               echo "  TIMEOUT_MINUTES: ${TIMEOUT_MINUTES} ✅"
             else
-              echo "  TIMEOUT_MINUTES: (default: 30)"
+              echo "  TIMEOUT_MINUTES: (default: 60)"
             fi
             
             echo "✅ 环境变量验证通过"
@@ -71,7 +70,7 @@
             echo "🚀 开始下载"
             echo "=========================================="
             
-            TIMEOUT_MINUTES="${TIMEOUT_MINUTES:-30}"
+            TIMEOUT_MINUTES="${TIMEOUT_MINUTES:-60}"
             TIMEOUT_SECONDS=$((TIMEOUT_MINUTES * 60))
             echo "⏱️ 超时设置: ${TIMEOUT_MINUTES} 分钟"
             echo ""
