@@ -1,5 +1,4 @@
 # CNB 流水线配置 - 磁力链接下载到 OneDrive
-# 通过 api_trigger 事件触发
 
 "**":
   api_trigger_magnet:
@@ -17,49 +16,70 @@
             echo "📡 聚合获取 Tracker 列表..."
             ALL_TRACKERS=""
             
-            # 源1: XIU2 (CF CDN)
-            echo "🔹 [1/3] XIU2/TrackersListCollection..."
-            XIU2=$(curl -fsSL --connect-timeout 10 "https://cf.trackerslist.com/all_aria2.txt" 2>/dev/null || echo "")
-            if [ -n "$XIU2" ]; then
-              ALL_TRACKERS="$XIU2"
-              echo "   ✅ XIU2: $(echo "$XIU2" | tr ',' '\n' | wc -l) trackers"
+            # 源1: adysec (最全)
+            echo "🔹 [1/5] adysec/tracker..."
+            ADYSEC=$(curl -fsSL --connect-timeout 15 "https://raw.githubusercontent.com/adysec/tracker/main/tracker_all.txt" 2>/dev/null | grep -v '^$' | tr '\n' ',' | sed 's/,$//' || echo "")
+            if [ -n "$ADYSEC" ]; then
+              ALL_TRACKERS="$ADYSEC"
+              echo "   ✅ adysec: $(echo "$ADYSEC" | tr ',' '\n' | grep -v '^$' | wc -l) trackers"
             fi
             
-            # 源2: ngosang all
-            echo "🔹 [2/3] ngosang/trackerslist..."
-            NGOSANG=$(curl -fsSL --connect-timeout 10 "https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_all.txt" 2>/dev/null | grep -v '^$' | tr '\n' ',' | sed 's/,$//' || echo "")
+            # 源2: XIU2 all
+            echo "🔹 [2/5] XIU2/TrackersListCollection (all)..."
+            XIU2=$(curl -fsSL --connect-timeout 15 "https://raw.githubusercontent.com/XIU2/TrackersListCollection/master/all.txt" 2>/dev/null | grep -v '^$' | tr '\n' ',' | sed 's/,$//' || echo "")
+            if [ -n "$XIU2" ]; then
+              [ -n "$ALL_TRACKERS" ] && ALL_TRACKERS="${ALL_TRACKERS},${XIU2}" || ALL_TRACKERS="$XIU2"
+              echo "   ✅ XIU2 all: $(echo "$XIU2" | tr ',' '\n' | grep -v '^$' | wc -l) trackers"
+            fi
+            
+            # 源3: XIU2 http
+            echo "🔹 [3/5] XIU2 (http)..."
+            XIU2_HTTP=$(curl -fsSL --connect-timeout 15 "https://raw.githubusercontent.com/XIU2/TrackersListCollection/master/http.txt" 2>/dev/null | grep -v '^$' | tr '\n' ',' | sed 's/,$//' || echo "")
+            if [ -n "$XIU2_HTTP" ]; then
+              [ -n "$ALL_TRACKERS" ] && ALL_TRACKERS="${ALL_TRACKERS},${XIU2_HTTP}" || ALL_TRACKERS="$XIU2_HTTP"
+              echo "   ✅ XIU2 http: $(echo "$XIU2_HTTP" | tr ',' '\n' | grep -v '^$' | wc -l) trackers"
+            fi
+            
+            # 源4: ngosang all
+            echo "🔹 [4/5] ngosang/trackerslist..."
+            NGOSANG=$(curl -fsSL --connect-timeout 15 "https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_all.txt" 2>/dev/null | grep -v '^$' | tr '\n' ',' | sed 's/,$//' || echo "")
             if [ -n "$NGOSANG" ]; then
               [ -n "$ALL_TRACKERS" ] && ALL_TRACKERS="${ALL_TRACKERS},${NGOSANG}" || ALL_TRACKERS="$NGOSANG"
-              echo "   ✅ ngosang: $(echo "$NGOSANG" | tr ',' '\n' | wc -l) trackers"
+              echo "   ✅ ngosang: $(echo "$NGOSANG" | tr ',' '\n' | grep -v '^$' | wc -l) trackers"
             fi
             
-            # 源3: 备用硬编码
-            echo "🔹 [3/3] 备用列表..."
-            BACKUP="udp://tracker.opentrackr.org:1337/announce,udp://open.stealth.si:80/announce,udp://tracker.torrent.eu.org:451/announce,udp://exodus.desync.com:6969/announce,udp://tracker.openbittorrent.com:6969/announce,udp://explodie.org:6969/announce,udp://bt1.archive.org:6969/announce,udp://bt2.archive.org:6969/announce"
+            # 源5: 备用硬编码
+            echo "🔹 [5/5] 备用列表..."
+            BACKUP="udp://tracker.opentrackr.org:1337/announce,udp://open.stealth.si:80/announce,udp://tracker.torrent.eu.org:451/announce,udp://exodus.desync.com:6969/announce,udp://tracker.openbittorrent.com:6969/announce,udp://explodie.org:6969/announce,udp://bt1.archive.org:6969/announce,udp://bt2.archive.org:6969/announce,udp://tracker.opentrackr.org:1337,udp://open.demonii.com:1337/announce,udp://tracker.coppersurfer.tk:6969/announce,udp://tracker.leechers-paradise.org:6969/announce,http://tracker.bt4g.com:2095/announce"
             [ -n "$ALL_TRACKERS" ] && ALL_TRACKERS="${ALL_TRACKERS},${BACKUP}" || ALL_TRACKERS="$BACKUP"
             
             # 去重
-            BEFORE=$(echo "$ALL_TRACKERS" | tr ',' '\n' | wc -l)
+            BEFORE=$(echo "$ALL_TRACKERS" | tr ',' '\n' | grep -v '^$' | wc -l)
             ALL_TRACKERS=$(echo "$ALL_TRACKERS" | tr ',' '\n' | grep -v '^$' | sort -u | tr '\n' ',' | sed 's/,$//')
-            AFTER=$(echo "$ALL_TRACKERS" | tr ',' '\n' | wc -l)
+            AFTER=$(echo "$ALL_TRACKERS" | tr ',' '\n' | grep -v '^$' | wc -l)
             echo "📊 去重: $BEFORE → $AFTER 个唯一 Tracker"
             
-            # 保存到文件供下一步使用
             echo "$ALL_TRACKERS" > /tmp/trackers.txt
+            echo "✅ Tracker 列表已保存"
 
         - name: Download magnet
           script: |
             echo "🚀 Starting aria2 download..."
-            echo "MAGNET: $MAGNET"
+            echo "📥 MAGNET: $MAGNET"
+            echo ""
             
             TRACKERS=$(cat /tmp/trackers.txt)
-            echo "📡 Using $(echo "$TRACKERS" | tr ',' '\n' | wc -l) trackers"
+            TRACKER_COUNT=$(echo "$TRACKERS" | tr ',' '\n' | grep -v '^$' | wc -l)
+            echo "📡 Using $TRACKER_COUNT trackers"
+            echo ""
             
             mkdir -p /downloads
+            
+            # 使用 --show-console-readout 显示详细进度
             aria2c "$MAGNET" \
               --dir=/downloads \
               --bt-tracker="$TRACKERS" \
-              --bt-max-peers=150 \
+              --bt-max-peers=200 \
               --max-connection-per-server=16 \
               --split=16 \
               --min-split-size=1M \
@@ -71,11 +91,19 @@
               --enable-dht=true \
               --enable-peer-exchange=true \
               --bt-enable-lpd=true \
-              --summary-interval=10 \
-              --bt-stop-timeout=600 \
-              --console-log-level=notice || echo "Download finished or timeout"
+              --bt-request-peer-speed-limit=10M \
+              --summary-interval=5 \
+              --bt-stop-timeout=900 \
+              --console-log-level=notice \
+              --show-console-readout=true \
+              --human-readable=true \
+              --download-result=full || echo "Download finished or timeout"
             
             echo ""
+            echo "=========================================="
             echo "📁 Downloaded files:"
             ls -lah /downloads/
-            du -sh /downloads/*
+            echo ""
+            echo "📊 Total size:"
+            du -sh /downloads/* 2>/dev/null || echo "No files downloaded"
+            echo "=========================================="
