@@ -1,126 +1,127 @@
-# CNB 流水线配置 - 磁力链接下载到 OneDrive
+# CNB 流水线配置 - 通用文件下载任务
+# 用途：下载用户有权限的文件并处理
 
 "**":
-  api_trigger_magnet:
-    - name: magnet-download-test
+  api_trigger_download:
+    - name: file-download-task
       docker:
         image: node:20-slim
       stages:
-        - name: Install tools
+        - name: Install deps
           script: |
+            set -euo pipefail
             echo "📦 安装依赖..."
             sed -i 's/deb.debian.org/mirrors.cloud.tencent.com/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true
             apt-get update
-            apt-get install -y --no-install-recommends aria2 curl ca-certificates
+            apt-get install -y --no-install-recommends ca-certificates curl aria2
             update-ca-certificates
+            rm -rf /var/lib/apt/lists/*
             echo "✅ 依赖安装完成"
 
-        - name: Prepare environment
+        - name: System info
           script: |
-            echo "🔧 准备环境..."
-            mkdir -p /root/.cache/aria2
+            echo "=== 系统信息 ==="
+            uname -a || true
+            echo ""
+            echo "=== 磁盘空间 ==="
+            df -h / || true
+            echo ""
+            echo "=== 内存 ==="
+            free -h || true
+            echo ""
+            echo "=== 网络 ==="
+            ip addr 2>/dev/null | grep -E "inet " || echo "无法获取 IP"
+            echo ""
+            echo "=== 外网 IP ==="
+            curl -fsSL --connect-timeout 5 ifconfig.me 2>/dev/null || echo "无法获取"
+            echo ""
+            echo "================"
+
+        - name: Validate env
+          script: |
+            set -euo pipefail
+            echo "� 验证环境变量..."
+            
+            # 检查必需变量（不输出具体值）
+            : "${DOWNLOAD_URL:?DOWNLOAD_URL is required}"
+            echo "  DOWNLOAD_URL: ${#DOWNLOAD_URL} chars ✅"
+            
+            # 可选变量检查
+            if [ -n "${TARGET_FOLDER:-}" ]; then
+              echo "  TARGET_FOLDER: ${TARGET_FOLDER} ✅"
+            else
+              echo "  TARGET_FOLDER: (default: downloads)"
+            fi
+            
+            if [ -n "${TIMEOUT_MINUTES:-}" ]; then
+              echo "  TIMEOUT_MINUTES: ${TIMEOUT_MINUTES} ✅"
+            else
+              echo "  TIMEOUT_MINUTES: (default: 30)"
+            fi
+            
+            echo "✅ 环境变量验证通过"
+
+        - name: Prepare workspace
+          script: |
+            set -euo pipefail
+            echo "� 准备工作目录..."
             mkdir -p /downloads
+            mkdir -p /root/.cache/aria2
             echo "✅ 目录创建完成"
 
-        - name: Get trackers
+        - name: Download file
           script: |
-            echo "📡 聚合获取 Tracker 列表..."
-            ALL_TRACKERS=""
-            
-            echo "🔹 [1/4] adysec/tracker..."
-            ADYSEC=$(curl -fsSL --connect-timeout 15 "https://raw.githubusercontent.com/adysec/tracker/main/tracker_all.txt" 2>/dev/null | grep -v '^$' | tr '\n' ',' | sed 's/,$//' || echo "")
-            if [ -n "$ADYSEC" ]; then
-              echo "   ✅ $(echo "$ADYSEC" | tr ',' '\n' | grep -v '^$' | wc -l) trackers"
-              ALL_TRACKERS="$ADYSEC"
-            fi
-            
-            echo "🔹 [2/4] XIU2 all..."
-            XIU2=$(curl -fsSL --connect-timeout 15 "https://raw.githubusercontent.com/XIU2/TrackersListCollection/master/all.txt" 2>/dev/null | grep -v '^$' | tr '\n' ',' | sed 's/,$//' || echo "")
-            if [ -n "$XIU2" ]; then
-              echo "   ✅ $(echo "$XIU2" | tr ',' '\n' | grep -v '^$' | wc -l) trackers"
-              if [ -n "$ALL_TRACKERS" ]; then ALL_TRACKERS="$ALL_TRACKERS,$XIU2"; else ALL_TRACKERS="$XIU2"; fi
-            fi
-            
-            echo "🔹 [3/4] XIU2 http..."
-            XIU2_HTTP=$(curl -fsSL --connect-timeout 15 "https://raw.githubusercontent.com/XIU2/TrackersListCollection/master/http.txt" 2>/dev/null | grep -v '^$' | tr '\n' ',' | sed 's/,$//' || echo "")
-            if [ -n "$XIU2_HTTP" ]; then
-              echo "   ✅ $(echo "$XIU2_HTTP" | tr ',' '\n' | grep -v '^$' | wc -l) trackers"
-              if [ -n "$ALL_TRACKERS" ]; then ALL_TRACKERS="$ALL_TRACKERS,$XIU2_HTTP"; else ALL_TRACKERS="$XIU2_HTTP"; fi
-            fi
-            
-            echo "🔹 [4/4] ngosang..."
-            NGOSANG=$(curl -fsSL --connect-timeout 15 "https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_all.txt" 2>/dev/null | grep -v '^$' | tr '\n' ',' | sed 's/,$//' || echo "")
-            if [ -n "$NGOSANG" ]; then
-              echo "   ✅ $(echo "$NGOSANG" | tr ',' '\n' | grep -v '^$' | wc -l) trackers"
-              if [ -n "$ALL_TRACKERS" ]; then ALL_TRACKERS="$ALL_TRACKERS,$NGOSANG"; else ALL_TRACKERS="$NGOSANG"; fi
-            fi
-            
-            BACKUP="http://tracker.bt4g.com:2095/announce,https://tracker.tamersunion.org:443/announce,udp://tracker.opentrackr.org:1337/announce,udp://open.stealth.si:80/announce"
-            if [ -n "$ALL_TRACKERS" ]; then ALL_TRACKERS="$ALL_TRACKERS,$BACKUP"; else ALL_TRACKERS="$BACKUP"; fi
-            
-            BEFORE=$(echo "$ALL_TRACKERS" | tr ',' '\n' | grep -v '^$' | wc -l)
-            ALL_TRACKERS=$(echo "$ALL_TRACKERS" | tr ',' '\n' | grep -v '^$' | sort -u | tr '\n' ',' | sed 's/,$//')
-            AFTER=$(echo "$ALL_TRACKERS" | tr ',' '\n' | grep -v '^$' | wc -l)
-            echo "📊 去重: $BEFORE → $AFTER 个 Tracker"
-            echo "$ALL_TRACKERS" > /tmp/trackers.txt
-
-        - name: Download magnet
-          script: |
+            set -euo pipefail
             echo "=========================================="
-            echo "🚀 开始下载磁力链接"
+            echo "🚀 开始下载"
             echo "=========================================="
             
-            if [ -z "$MAGNET" ]; then
-              echo "❌ MAGNET 环境变量为空!"
-              exit 1
-            fi
-            echo "📥 MAGNET: $MAGNET"
+            # 设置超时（默认30分钟）
+            TIMEOUT_MINUTES="${TIMEOUT_MINUTES:-30}"
+            TIMEOUT_SECONDS=$((TIMEOUT_MINUTES * 60))
+            echo "⏱️ 超时设置: ${TIMEOUT_MINUTES} 分钟"
             echo ""
             
-            TRACKERS=$(cat /tmp/trackers.txt 2>/dev/null || echo "udp://tracker.opentrackr.org:1337/announce")
-            echo "📡 Tracker 数量: $(echo "$TRACKERS" | tr ',' '\n' | grep -v '^$' | wc -l)"
-            echo ""
+            # 开始下载
+            echo "⏳ 启动下载..."
+            START_TIME=$(date +%s)
             
-            echo "⏳ 启动 aria2c..."
-            echo ""
-            
-            aria2c "$MAGNET" \
+            # 使用 timeout 命令控制最大执行时间
+            timeout "${TIMEOUT_SECONDS}s" aria2c "$DOWNLOAD_URL" \
               --dir=/downloads \
-              --bt-tracker="$TRACKERS" \
-              --bt-max-peers=200 \
               --max-connection-per-server=16 \
               --split=16 \
               --min-split-size=1M \
               --file-allocation=none \
-              --seed-time=0 \
-              --check-integrity=true \
               --continue=true \
               --max-concurrent-downloads=5 \
-              --enable-dht=true \
-              --disable-ipv6=true \
-              --bt-enable-lpd=true \
-              --enable-peer-exchange=true \
-              --bt-request-peer-speed-limit=10M \
-              --bt-stop-timeout=1800 \
-              --summary-interval=10 \
+              --summary-interval=30 \
               --console-log-level=notice \
-              --show-console-readout=true \
               --human-readable=true \
               --download-result=full \
-              --dht-file-path=/root/.cache/aria2/dht.dat \
-              --save-session=/root/.cache/aria2/session
+              || EXIT_CODE=$?
             
-            EXIT_CODE=$?
+            END_TIME=$(date +%s)
+            DURATION=$((END_TIME - START_TIME))
+            
             echo ""
             echo "=========================================="
-            if [ "$EXIT_CODE" = "0" ]; then
+            echo "📊 下载统计"
+            echo "=========================================="
+            echo "⏱️ 耗时: ${DURATION} 秒"
+            
+            if [ "${EXIT_CODE:-0}" = "0" ]; then
               echo "✅ 下载完成!"
+            elif [ "${EXIT_CODE:-0}" = "124" ]; then
+              echo "⚠️ 下载超时 (${TIMEOUT_MINUTES}分钟)"
             else
-              echo "⚠️ 退出码: $EXIT_CODE"
+              echo "❌ 下载失败 (exit code: ${EXIT_CODE:-unknown})"
             fi
+            
             echo ""
-            echo "📁 下载目录:"
-            ls -lah /downloads/
+            echo "📁 下载目录内容:"
+            ls -lah /downloads/ 2>/dev/null || echo "  (空)"
             echo ""
-            du -sh /downloads/* 2>/dev/null || echo "无文件"
+            echo "📊 文件大小:"
+            du -sh /downloads/* 2>/dev/null || echo "  无文件"
             echo "=========================================="
