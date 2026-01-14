@@ -3,24 +3,39 @@
 
 # 匹配所有分支
 "**":
-  # API 触发事件 - 用于磁力链接下载
+  # API 触发事件 - 测试磁力下载
   api_trigger_magnet:
-    - name: magnet-download
+    - name: magnet-download-test
       docker:
-        # 使用 Node.js 镜像，自带 node 和 npm，省去安装时间
         image: node:20-slim
       stages:
         - name: Install aria2
           script: |
-            # 使用腾讯云镜像源加速
-            sed -i 's/deb.debian.org/mirrors.cloud.tencent.com/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || \
-            sed -i 's/deb.debian.org/mirrors.cloud.tencent.com/g' /etc/apt/sources.list 2>/dev/null || true
+            sed -i 's/deb.debian.org/mirrors.cloud.tencent.com/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true
             apt-get update && apt-get install -y --no-install-recommends aria2 curl
-            npm install axios
-
-        - name: Get Trackers and Download
+        
+        - name: Download magnet
           script: |
             echo "📡 Fetching trackers..."
-            export BT_TRACKERS=$(curl -fsSL https://cf.trackerslist.com/best_aria2.txt || echo "")
-            echo "🚀 Starting download..."
-            node stream_upload.js
+            TRACKERS=$(curl -fsSL https://cf.trackerslist.com/best_aria2.txt || echo "")
+            echo "Got ${#TRACKERS} bytes of trackers"
+            
+            echo "🚀 Starting aria2 download..."
+            echo "MAGNET: $MAGNET"
+            
+            mkdir -p /downloads
+            aria2c \
+              --bt-tracker="$TRACKERS" \
+              --file-allocation=none \
+              --seed-time=0 \
+              --max-connection-per-server=16 \
+              --bt-max-peers=100 \
+              --summary-interval=5 \
+              --dir=/downloads \
+              --max-overall-download-limit=0 \
+              --bt-stop-timeout=300 \
+              "$MAGNET" || echo "Download finished or timeout"
+            
+            echo "📁 Downloaded files:"
+            ls -lah /downloads/
+            du -sh /downloads/
