@@ -6,10 +6,30 @@
       docker:
         image: node:20-slim
       stages:
-        - name: Install aria2
+        - name: Install tools
           script: |
             sed -i 's/deb.debian.org/mirrors.cloud.tencent.com/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true
-            apt-get update && apt-get install -y --no-install-recommends aria2 curl
+            apt-get update && apt-get install -y --no-install-recommends aria2 curl netcat-openbsd
+
+        - name: Network diagnostics
+          script: |
+            echo "🔍 网络诊断..."
+            echo ""
+            echo "📍 当前 IP:"
+            curl -fsSL --connect-timeout 5 ifconfig.me 2>/dev/null || echo "无法获取"
+            echo ""
+            echo ""
+            echo "🌐 测试 HTTP 连接:"
+            curl -fsSL --connect-timeout 5 -o /dev/null -w "  baidu.com: %{http_code}\n" https://www.baidu.com 2>/dev/null || echo "  baidu.com: 失败"
+            curl -fsSL --connect-timeout 5 -o /dev/null -w "  github.com: %{http_code}\n" https://github.com 2>/dev/null || echo "  github.com: 失败"
+            echo ""
+            echo "🔌 测试 UDP 端口 (DHT):"
+            nc -zu -w2 router.bittorrent.com 6881 && echo "  router.bittorrent.com:6881 ✅" || echo "  router.bittorrent.com:6881 ❌ (UDP可能被封)"
+            nc -zu -w2 dht.transmissionbt.com 6881 && echo "  dht.transmissionbt.com:6881 ✅" || echo "  dht.transmissionbt.com:6881 ❌"
+            echo ""
+            echo "🔌 测试 TCP Tracker:"
+            nc -zv -w2 tracker.opentrackr.org 1337 2>&1 | head -1 || echo "  tracker.opentrackr.org:1337 ❌"
+            echo ""
 
         - name: Get trackers
           script: |
@@ -19,63 +39,70 @@
             # 源1: adysec (最全)
             echo "🔹 [1/5] adysec/tracker..."
             ADYSEC=$(curl -fsSL --connect-timeout 15 "https://raw.githubusercontent.com/adysec/tracker/main/tracker_all.txt" 2>/dev/null | grep -v '^$' | tr '\n' ',' | sed 's/,$//' || echo "")
-            if [ -n "$ADYSEC" ]; then
-              ALL_TRACKERS="$ADYSEC"
-              echo "   ✅ adysec: $(echo "$ADYSEC" | tr ',' '\n' | grep -v '^$' | wc -l) trackers"
-            fi
+            [ -n "$ADYSEC" ] && echo "   ✅ $(echo "$ADYSEC" | tr ',' '\n' | grep -v '^$' | wc -l) trackers" || echo "   ❌ 获取失败"
+            [ -n "$ADYSEC" ] && ALL_TRACKERS="$ADYSEC"
             
             # 源2: XIU2 all
-            echo "🔹 [2/5] XIU2/TrackersListCollection (all)..."
+            echo "🔹 [2/5] XIU2 all..."
             XIU2=$(curl -fsSL --connect-timeout 15 "https://raw.githubusercontent.com/XIU2/TrackersListCollection/master/all.txt" 2>/dev/null | grep -v '^$' | tr '\n' ',' | sed 's/,$//' || echo "")
-            if [ -n "$XIU2" ]; then
-              [ -n "$ALL_TRACKERS" ] && ALL_TRACKERS="${ALL_TRACKERS},${XIU2}" || ALL_TRACKERS="$XIU2"
-              echo "   ✅ XIU2 all: $(echo "$XIU2" | tr ',' '\n' | grep -v '^$' | wc -l) trackers"
-            fi
+            [ -n "$XIU2" ] && echo "   ✅ $(echo "$XIU2" | tr ',' '\n' | grep -v '^$' | wc -l) trackers" || echo "   ❌ 获取失败"
+            [ -n "$XIU2" ] && { [ -n "$ALL_TRACKERS" ] && ALL_TRACKERS="${ALL_TRACKERS},${XIU2}" || ALL_TRACKERS="$XIU2"; }
             
-            # 源3: XIU2 http
-            echo "🔹 [3/5] XIU2 (http)..."
+            # 源3: XIU2 http (HTTP tracker 更容易穿透防火墙)
+            echo "🔹 [3/5] XIU2 http..."
             XIU2_HTTP=$(curl -fsSL --connect-timeout 15 "https://raw.githubusercontent.com/XIU2/TrackersListCollection/master/http.txt" 2>/dev/null | grep -v '^$' | tr '\n' ',' | sed 's/,$//' || echo "")
-            if [ -n "$XIU2_HTTP" ]; then
-              [ -n "$ALL_TRACKERS" ] && ALL_TRACKERS="${ALL_TRACKERS},${XIU2_HTTP}" || ALL_TRACKERS="$XIU2_HTTP"
-              echo "   ✅ XIU2 http: $(echo "$XIU2_HTTP" | tr ',' '\n' | grep -v '^$' | wc -l) trackers"
-            fi
+            [ -n "$XIU2_HTTP" ] && echo "   ✅ $(echo "$XIU2_HTTP" | tr ',' '\n' | grep -v '^$' | wc -l) trackers" || echo "   ❌ 获取失败"
+            [ -n "$XIU2_HTTP" ] && { [ -n "$ALL_TRACKERS" ] && ALL_TRACKERS="${ALL_TRACKERS},${XIU2_HTTP}" || ALL_TRACKERS="$XIU2_HTTP"; }
             
-            # 源4: ngosang all
-            echo "🔹 [4/5] ngosang/trackerslist..."
+            # 源4: ngosang
+            echo "🔹 [4/5] ngosang..."
             NGOSANG=$(curl -fsSL --connect-timeout 15 "https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_all.txt" 2>/dev/null | grep -v '^$' | tr '\n' ',' | sed 's/,$//' || echo "")
-            if [ -n "$NGOSANG" ]; then
-              [ -n "$ALL_TRACKERS" ] && ALL_TRACKERS="${ALL_TRACKERS},${NGOSANG}" || ALL_TRACKERS="$NGOSANG"
-              echo "   ✅ ngosang: $(echo "$NGOSANG" | tr ',' '\n' | grep -v '^$' | wc -l) trackers"
-            fi
+            [ -n "$NGOSANG" ] && echo "   ✅ $(echo "$NGOSANG" | tr ',' '\n' | grep -v '^$' | wc -l) trackers" || echo "   ❌ 获取失败"
+            [ -n "$NGOSANG" ] && { [ -n "$ALL_TRACKERS" ] && ALL_TRACKERS="${ALL_TRACKERS},${NGOSANG}" || ALL_TRACKERS="$NGOSANG"; }
             
-            # 源5: 备用硬编码
+            # 源5: 备用
             echo "🔹 [5/5] 备用列表..."
-            BACKUP="udp://tracker.opentrackr.org:1337/announce,udp://open.stealth.si:80/announce,udp://tracker.torrent.eu.org:451/announce,udp://exodus.desync.com:6969/announce,udp://tracker.openbittorrent.com:6969/announce,udp://explodie.org:6969/announce,udp://bt1.archive.org:6969/announce,udp://bt2.archive.org:6969/announce,udp://tracker.opentrackr.org:1337,udp://open.demonii.com:1337/announce,udp://tracker.coppersurfer.tk:6969/announce,udp://tracker.leechers-paradise.org:6969/announce,http://tracker.bt4g.com:2095/announce"
+            BACKUP="http://tracker.bt4g.com:2095/announce,https://tracker.tamersunion.org:443/announce,http://open.acgnxtracker.com:80/announce,udp://tracker.opentrackr.org:1337/announce,udp://open.stealth.si:80/announce,udp://exodus.desync.com:6969/announce,udp://tracker.openbittorrent.com:6969/announce"
             [ -n "$ALL_TRACKERS" ] && ALL_TRACKERS="${ALL_TRACKERS},${BACKUP}" || ALL_TRACKERS="$BACKUP"
             
             # 去重
             BEFORE=$(echo "$ALL_TRACKERS" | tr ',' '\n' | grep -v '^$' | wc -l)
             ALL_TRACKERS=$(echo "$ALL_TRACKERS" | tr ',' '\n' | grep -v '^$' | sort -u | tr '\n' ',' | sed 's/,$//')
             AFTER=$(echo "$ALL_TRACKERS" | tr ',' '\n' | grep -v '^$' | wc -l)
+            echo ""
             echo "📊 去重: $BEFORE → $AFTER 个唯一 Tracker"
-            
             echo "$ALL_TRACKERS" > /tmp/trackers.txt
-            echo "✅ Tracker 列表已保存"
 
         - name: Download magnet
           script: |
-            echo "🚀 Starting aria2 download..."
-            echo "📥 MAGNET: $MAGNET"
+            echo "=========================================="
+            echo "🚀 开始下载磁力链接"
+            echo "=========================================="
+            
+            # 检查 MAGNET 变量
+            if [ -z "$MAGNET" ]; then
+              echo "❌ 错误: MAGNET 环境变量为空!"
+              exit 1
+            fi
+            echo "📥 MAGNET: ${MAGNET:0:60}..."
             echo ""
             
-            TRACKERS=$(cat /tmp/trackers.txt)
-            TRACKER_COUNT=$(echo "$TRACKERS" | tr ',' '\n' | grep -v '^$' | wc -l)
-            echo "📡 Using $TRACKER_COUNT trackers"
+            # 加载 Tracker
+            if [ -s /tmp/trackers.txt ]; then
+              TRACKERS=$(cat /tmp/trackers.txt)
+              echo "📡 已加载 $(echo "$TRACKERS" | tr ',' '\n' | grep -v '^$' | wc -l) 个 Tracker"
+            else
+              echo "⚠️ Tracker 文件为空，使用备用"
+              TRACKERS="http://tracker.bt4g.com:2095/announce,udp://tracker.opentrackr.org:1337/announce"
+            fi
             echo ""
             
             mkdir -p /downloads
             
-            # 使用 --show-console-readout 显示详细进度
+            echo "⏳ 启动 aria2c (超时15分钟)..."
+            echo "   如果长时间显示 0B/s，说明找不到 peers"
+            echo ""
+            
             aria2c "$MAGNET" \
               --dir=/downloads \
               --bt-tracker="$TRACKERS" \
@@ -89,21 +116,29 @@
               --continue=true \
               --max-concurrent-downloads=5 \
               --enable-dht=true \
-              --enable-peer-exchange=true \
+              --enable-dht6=true \
               --bt-enable-lpd=true \
+              --enable-peer-exchange=true \
               --bt-request-peer-speed-limit=10M \
-              --summary-interval=5 \
               --bt-stop-timeout=900 \
+              --summary-interval=3 \
               --console-log-level=notice \
               --show-console-readout=true \
               --human-readable=true \
-              --download-result=full || echo "Download finished or timeout"
+              --download-result=full
             
+            EXIT_CODE=$?
             echo ""
             echo "=========================================="
-            echo "📁 Downloaded files:"
-            ls -lah /downloads/
+            if [ $EXIT_CODE -eq 0 ]; then
+              echo "✅ 下载完成!"
+            else
+              echo "❌ 下载失败或超时 (exit code: $EXIT_CODE)"
+            fi
             echo ""
-            echo "📊 Total size:"
-            du -sh /downloads/* 2>/dev/null || echo "No files downloaded"
+            echo "📁 下载目录内容:"
+            ls -lah /downloads/ 2>/dev/null || echo "  (空)"
+            echo ""
+            echo "📊 文件大小:"
+            du -sh /downloads/* 2>/dev/null || echo "  无文件"
             echo "=========================================="
