@@ -1,5 +1,4 @@
 # CNB 流水线配置 - 通用文件下载任务
-# 用途：下载用户有权限的文件并处理
 
 "**":
   api_trigger_download:
@@ -9,7 +8,7 @@
       stages:
         - name: Install deps
           script: |
-            set -euo pipefail
+            set -e
             echo "📦 安装依赖..."
             sed -i 's/deb.debian.org/mirrors.cloud.tencent.com/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true
             apt-get update
@@ -29,9 +28,6 @@
             echo "=== 内存 ==="
             free -h || true
             echo ""
-            echo "=== 网络 ==="
-            ip addr 2>/dev/null | grep -E "inet " || echo "无法获取 IP"
-            echo ""
             echo "=== 外网 IP ==="
             curl -fsSL --connect-timeout 5 ifconfig.me 2>/dev/null || echo "无法获取"
             echo ""
@@ -39,18 +35,17 @@
 
         - name: Validate env
           script: |
-            set -euo pipefail
-            echo "� 验证环境变量..."
+            set -e
+            echo "🔍 验证环境变量..."
             
-            # 检查必需变量（不输出具体值）
-            : "${DOWNLOAD_URL:?DOWNLOAD_URL is required}"
-            echo "  DOWNLOAD_URL: ${#DOWNLOAD_URL} chars ✅"
+            if [ -z "$DOWNLOAD_URL" ]; then
+              echo "❌ DOWNLOAD_URL is required"
+              exit 1
+            fi
+            echo "  DOWNLOAD_URL: present ✅"
             
-            # 可选变量检查
             if [ -n "${TARGET_FOLDER:-}" ]; then
               echo "  TARGET_FOLDER: ${TARGET_FOLDER} ✅"
-            else
-              echo "  TARGET_FOLDER: (default: downloads)"
             fi
             
             if [ -n "${TIMEOUT_MINUTES:-}" ]; then
@@ -63,30 +58,27 @@
 
         - name: Prepare workspace
           script: |
-            set -euo pipefail
-            echo "� 准备工作目录..."
+            set -e
+            echo "🔧 准备工作目录..."
             mkdir -p /downloads
             mkdir -p /root/.cache/aria2
             echo "✅ 目录创建完成"
 
         - name: Download file
           script: |
-            set -euo pipefail
+            set -e
             echo "=========================================="
             echo "🚀 开始下载"
             echo "=========================================="
             
-            # 设置超时（默认30分钟）
             TIMEOUT_MINUTES="${TIMEOUT_MINUTES:-30}"
             TIMEOUT_SECONDS=$((TIMEOUT_MINUTES * 60))
             echo "⏱️ 超时设置: ${TIMEOUT_MINUTES} 分钟"
             echo ""
             
-            # 开始下载
             echo "⏳ 启动下载..."
             START_TIME=$(date +%s)
             
-            # 使用 timeout 命令控制最大执行时间
             timeout "${TIMEOUT_SECONDS}s" aria2c "$DOWNLOAD_URL" \
               --dir=/downloads \
               --max-connection-per-server=16 \
@@ -98,8 +90,7 @@
               --summary-interval=30 \
               --console-log-level=notice \
               --human-readable=true \
-              --download-result=full \
-              || EXIT_CODE=$?
+              --download-result=full || EXIT_CODE=$?
             
             END_TIME=$(date +%s)
             DURATION=$((END_TIME - START_TIME))
@@ -115,7 +106,7 @@
             elif [ "${EXIT_CODE:-0}" = "124" ]; then
               echo "⚠️ 下载超时 (${TIMEOUT_MINUTES}分钟)"
             else
-              echo "❌ 下载失败 (exit code: ${EXIT_CODE:-unknown})"
+              echo "⚠️ 退出码: ${EXIT_CODE:-unknown}"
             fi
             
             echo ""
