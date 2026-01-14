@@ -1,9 +1,7 @@
 # CNB 流水线配置 - 磁力链接下载到 OneDrive
 # 通过 api_trigger 事件触发
 
-# 匹配所有分支
 "**":
-  # API 触发事件 - 测试磁力下载
   api_trigger_magnet:
     - name: magnet-download-test
       docker:
@@ -13,29 +11,71 @@
           script: |
             sed -i 's/deb.debian.org/mirrors.cloud.tencent.com/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true
             apt-get update && apt-get install -y --no-install-recommends aria2 curl
-        
+
+        - name: Get trackers
+          script: |
+            echo "📡 聚合获取 Tracker 列表..."
+            ALL_TRACKERS=""
+            
+            # 源1: XIU2 (CF CDN)
+            echo "🔹 [1/3] XIU2/TrackersListCollection..."
+            XIU2=$(curl -fsSL --connect-timeout 10 "https://cf.trackerslist.com/all_aria2.txt" 2>/dev/null || echo "")
+            if [ -n "$XIU2" ]; then
+              ALL_TRACKERS="$XIU2"
+              echo "   ✅ XIU2: $(echo "$XIU2" | tr ',' '\n' | wc -l) trackers"
+            fi
+            
+            # 源2: ngosang all
+            echo "🔹 [2/3] ngosang/trackerslist..."
+            NGOSANG=$(curl -fsSL --connect-timeout 10 "https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_all.txt" 2>/dev/null | grep -v '^$' | tr '\n' ',' | sed 's/,$//' || echo "")
+            if [ -n "$NGOSANG" ]; then
+              [ -n "$ALL_TRACKERS" ] && ALL_TRACKERS="${ALL_TRACKERS},${NGOSANG}" || ALL_TRACKERS="$NGOSANG"
+              echo "   ✅ ngosang: $(echo "$NGOSANG" | tr ',' '\n' | wc -l) trackers"
+            fi
+            
+            # 源3: 备用硬编码
+            echo "🔹 [3/3] 备用列表..."
+            BACKUP="udp://tracker.opentrackr.org:1337/announce,udp://open.stealth.si:80/announce,udp://tracker.torrent.eu.org:451/announce,udp://exodus.desync.com:6969/announce,udp://tracker.openbittorrent.com:6969/announce,udp://explodie.org:6969/announce,udp://bt1.archive.org:6969/announce,udp://bt2.archive.org:6969/announce"
+            [ -n "$ALL_TRACKERS" ] && ALL_TRACKERS="${ALL_TRACKERS},${BACKUP}" || ALL_TRACKERS="$BACKUP"
+            
+            # 去重
+            BEFORE=$(echo "$ALL_TRACKERS" | tr ',' '\n' | wc -l)
+            ALL_TRACKERS=$(echo "$ALL_TRACKERS" | tr ',' '\n' | grep -v '^$' | sort -u | tr '\n' ',' | sed 's/,$//')
+            AFTER=$(echo "$ALL_TRACKERS" | tr ',' '\n' | wc -l)
+            echo "📊 去重: $BEFORE → $AFTER 个唯一 Tracker"
+            
+            # 保存到文件供下一步使用
+            echo "$ALL_TRACKERS" > /tmp/trackers.txt
+
         - name: Download magnet
           script: |
-            echo "📡 Fetching trackers..."
-            TRACKERS=$(curl -fsSL https://cf.trackerslist.com/best_aria2.txt || echo "")
-            echo "Got ${#TRACKERS} bytes of trackers"
-            
             echo "🚀 Starting aria2 download..."
             echo "MAGNET: $MAGNET"
             
+            TRACKERS=$(cat /tmp/trackers.txt)
+            echo "📡 Using $(echo "$TRACKERS" | tr ',' '\n' | wc -l) trackers"
+            
             mkdir -p /downloads
-            aria2c \
+            aria2c "$MAGNET" \
+              --dir=/downloads \
               --bt-tracker="$TRACKERS" \
+              --bt-max-peers=150 \
+              --max-connection-per-server=16 \
+              --split=16 \
+              --min-split-size=1M \
               --file-allocation=none \
               --seed-time=0 \
-              --max-connection-per-server=16 \
-              --bt-max-peers=100 \
-              --summary-interval=5 \
-              --dir=/downloads \
-              --max-overall-download-limit=0 \
-              --bt-stop-timeout=300 \
-              "$MAGNET" || echo "Download finished or timeout"
+              --check-integrity=true \
+              --continue=true \
+              --max-concurrent-downloads=5 \
+              --enable-dht=true \
+              --enable-peer-exchange=true \
+              --bt-enable-lpd=true \
+              --summary-interval=10 \
+              --bt-stop-timeout=600 \
+              --console-log-level=notice || echo "Download finished or timeout"
             
+            echo ""
             echo "📁 Downloaded files:"
             ls -lah /downloads/
-            du -sh /downloads/
+            du -sh /downloads/*
