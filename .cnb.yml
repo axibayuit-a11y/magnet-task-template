@@ -1,4 +1,4 @@
-# CNB 流水线配置 - 通用文件下载任务
+# CNB 流水线配置 - 文件下载任务
 
 "**":
   api_trigger_download:
@@ -23,95 +23,98 @@
         - name: System info
           script: |
             echo "=== 系统信息 ==="
-            uname -a || true
-            echo ""
-            echo "=== CPU 核数 ==="
-            nproc || echo "unknown"
-            echo ""
-            echo "=== 磁盘空间 ==="
-            df -h / || true
-            echo ""
-            echo "=== 外网 IP ==="
-            curl -fsSL --connect-timeout 5 ifconfig.me 2>/dev/null || echo "无法获取"
-            echo ""
+            echo "CPU 核数: $(nproc || echo unknown)"
+            echo "磁盘空间: $(df -h / | tail -1 | awk '{print $4}') 可用"
+            echo "外网 IP: $(curl -fsSL --connect-timeout 5 ifconfig.me 2>/dev/null || echo unknown)"
             echo "================"
 
-        - name: Validate env
+        - name: Get trackers
           script: |
-            set -e
-            echo "🔍 验证环境变量..."
+            echo "📡 获取 Tracker 列表..."
+            ALL_TRACKERS=""
             
-            if [ -z "$DOWNLOAD_URL" ]; then
-              echo "❌ DOWNLOAD_URL is required"
-              exit 1
-            fi
-            echo "  DOWNLOAD_URL: present ✅"
-            
-            if [ -n "${TIMEOUT_MINUTES:-}" ]; then
-              echo "  TIMEOUT_MINUTES: ${TIMEOUT_MINUTES} ✅"
-            else
-              echo "  TIMEOUT_MINUTES: (default: 60)"
+            XIU2=$(curl -fsSL --connect-timeout 15 "https://raw.githubusercontent.com/XIU2/TrackersListCollection/master/all.txt" 2>/dev/null | grep -v '^$' | tr '\n' ',' | sed 's/,$//' || echo "")
+            if [ -n "$XIU2" ]; then
+              echo "✅ XIU2: $(echo "$XIU2" | tr ',' '\n' | grep -v '^$' | wc -l) trackers"
+              ALL_TRACKERS="$XIU2"
             fi
             
-            echo "✅ 环境变量验证通过"
+            NGOSANG=$(curl -fsSL --connect-timeout 15 "https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_all.txt" 2>/dev/null | grep -v '^$' | tr '\n' ',' | sed 's/,$//' || echo "")
+            if [ -n "$NGOSANG" ]; then
+              echo "✅ ngosang: $(echo "$NGOSANG" | tr ',' '\n' | grep -v '^$' | wc -l) trackers"
+              if [ -n "$ALL_TRACKERS" ]; then ALL_TRACKERS="$ALL_TRACKERS,$NGOSANG"; else ALL_TRACKERS="$NGOSANG"; fi
+            fi
+            
+            BACKUP="http://tracker.bt4g.com:2095/announce,udp://tracker.opentrackr.org:1337/announce,udp://open.stealth.si:80/announce"
+            if [ -n "$ALL_TRACKERS" ]; then ALL_TRACKERS="$ALL_TRACKERS,$BACKUP"; else ALL_TRACKERS="$BACKUP"; fi
+            
+            ALL_TRACKERS=$(echo "$ALL_TRACKERS" | tr ',' '\n' | grep -v '^$' | sort -u | tr '\n' ',' | sed 's/,$//')
+            echo "📊 共 $(echo "$ALL_TRACKERS" | tr ',' '\n' | grep -v '^$' | wc -l) 个唯一 Tracker"
+            echo "$ALL_TRACKERS" > /tmp/trackers.txt
 
-        - name: Prepare workspace
-          script: |
-            set -e
-            echo "🔧 准备工作目录..."
-            mkdir -p /downloads
-            mkdir -p /root/.cache/aria2
-            echo "✅ 目录创建完成"
-
-        - name: Download file
+        - name: Download
           script: |
             set -e
             echo "=========================================="
             echo "🚀 开始下载"
             echo "=========================================="
             
+            if [ -z "$DOWNLOAD_URL" ]; then
+              echo "❌ DOWNLOAD_URL is required"
+              exit 1
+            fi
+            
             TIMEOUT_MINUTES="${TIMEOUT_MINUTES:-60}"
-            TIMEOUT_SECONDS=$((TIMEOUT_MINUTES * 60))
-            echo "⏱️ 超时设置: ${TIMEOUT_MINUTES} 分钟"
+            echo "⏱️ 超时: ${TIMEOUT_MINUTES} 分钟"
             echo ""
             
-            echo "⏳ 启动下载..."
-            START_TIME=$(date +%s)
+            mkdir -p /downloads
+            mkdir -p /root/.cache/aria2
             
-            timeout "${TIMEOUT_SECONDS}s" aria2c "$DOWNLOAD_URL" \
-              --dir=/downloads \
-              --max-connection-per-server=16 \
-              --split=16 \
-              --min-split-size=1M \
-              --file-allocation=none \
-              --continue=true \
-              --max-concurrent-downloads=5 \
-              --summary-interval=30 \
-              --console-log-level=notice \
-              --human-readable=true \
-              --download-result=full || EXIT_CODE=$?
-            
-            END_TIME=$(date +%s)
-            DURATION=$((END_TIME - START_TIME))
-            
-            echo ""
-            echo "=========================================="
-            echo "📊 下载统计"
-            echo "=========================================="
-            echo "⏱️ 耗时: ${DURATION} 秒"
-            
-            if [ "${EXIT_CODE:-0}" = "0" ]; then
-              echo "✅ 下载完成!"
-            elif [ "${EXIT_CODE:-0}" = "124" ]; then
-              echo "⚠️ 下载超时 (${TIMEOUT_MINUTES}分钟)"
+            # 判断是磁力链接还是普通 URL
+            if echo "$DOWNLOAD_URL" | grep -q "^magnet:"; then
+              echo "🧲 检测到磁力链接"
+              TRACKERS=$(cat /tmp/trackers.txt 2>/dev/null || echo "")
+              
+              timeout "$((TIMEOUT_MINUTES * 60))s" aria2c "$DOWNLOAD_URL" \
+                --dir=/downloads \
+                --bt-tracker="$TRACKERS" \
+                --bt-max-peers=200 \
+                --max-connection-per-server=16 \
+                --file-allocation=none \
+                --seed-time=0 \
+                --enable-dht=true \
+                --disable-ipv6=true \
+                --bt-enable-lpd=true \
+                --enable-peer-exchange=true \
+                --bt-stop-timeout=1800 \
+                --summary-interval=30 \
+                --console-log-level=notice \
+                --human-readable=true \
+                --download-result=full || EXIT_CODE=$?
             else
-              echo "⚠️ 退出码: ${EXIT_CODE:-unknown}"
+              echo "🔗 检测到普通 URL"
+              timeout "$((TIMEOUT_MINUTES * 60))s" aria2c "$DOWNLOAD_URL" \
+                --dir=/downloads \
+                --max-connection-per-server=16 \
+                --split=16 \
+                --file-allocation=none \
+                --continue=true \
+                --summary-interval=30 \
+                --console-log-level=notice \
+                --human-readable=true \
+                --download-result=full || EXIT_CODE=$?
             fi
             
             echo ""
-            echo "📁 下载目录内容:"
-            ls -lah /downloads/ 2>/dev/null || echo "  (空)"
+            echo "=========================================="
+            if [ "${EXIT_CODE:-0}" = "0" ]; then
+              echo "✅ 下载完成!"
+            else
+              echo "⚠️ 退出码: ${EXIT_CODE:-unknown}"
+            fi
             echo ""
-            echo "📊 文件大小:"
-            du -sh /downloads/* 2>/dev/null || echo "  无文件"
+            echo "📁 下载目录:"
+            ls -lah /downloads/
+            du -sh /downloads/* 2>/dev/null || echo "无文件"
             echo "=========================================="
