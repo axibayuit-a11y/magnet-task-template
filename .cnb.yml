@@ -1,7 +1,8 @@
 # CNB 流水线配置 - 磁力链接下载到 OneDrive
 # 通过 api_trigger 事件触发
 
-main:
+# 匹配所有分支
+"**":
   # API 触发事件 - 用于磁力链接下载
   api_trigger_magnet:
     - name: magnet-download
