@@ -76,6 +76,7 @@
               echo "🧲 检测到磁力链接"
               TRACKERS=$(cat /tmp/trackers.txt 2>/dev/null || echo "")
               
+              # bt-stop-timeout: 600秒(10分钟)无进度自动停止
               timeout "$((TIMEOUT_MINUTES * 60))s" aria2c "$DOWNLOAD_URL" \
                 --dir=/downloads \
                 --bt-tracker="$TRACKERS" \
@@ -87,11 +88,19 @@
                 --disable-ipv6=true \
                 --bt-enable-lpd=true \
                 --enable-peer-exchange=true \
-                --bt-stop-timeout=1800 \
+                --bt-stop-timeout=600 \
                 --summary-interval=30 \
                 --console-log-level=notice \
                 --human-readable=true \
                 --download-result=full || EXIT_CODE=$?
+              
+              if [ "${EXIT_CODE:-0}" != "0" ]; then
+                echo ""
+                echo "⚠️ 磁力下载失败，可能原因："
+                echo "   1. 资源无人做种（太冷门）"
+                echo "   2. 磁力链接无效"
+                echo "   3. 网络无法连接 DHT/Tracker"
+              fi
             else
               echo "🔗 检测到普通 URL"
               timeout "$((TIMEOUT_MINUTES * 60))s" aria2c "$DOWNLOAD_URL" \
