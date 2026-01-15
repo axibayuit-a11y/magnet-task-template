@@ -64,7 +64,12 @@ async function main() {
     // 构建上传基础路径：rootPath/uploadFolder/dateFolder/torrentName
     const now = new Date();
     const dateFolder = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}`;
-    const uploadBasePath = [rootPath, uploadFolder, dateFolder, torrentName].filter(p => p).join('/');
+    
+    // 清理种子名（移除特殊字符）
+    const cleanTorrentName = sanitizeFolderName(torrentName) || `magnet_${Date.now()}`;
+    console.log('Clean torrent name:', cleanTorrentName);
+    
+    const uploadBasePath = [rootPath, uploadFolder, dateFolder, cleanTorrentName].filter(p => p).join('/');
     console.log('Upload path:', uploadBasePath);
 
     // 进度报告函数
@@ -215,6 +220,11 @@ async function normalDownloadAndUpload(magnet, trackers, downloadDir, totalSize,
     });
 
     console.log('Download complete, uploading...');
+    // 报告下载完成，开始上传
+    if (reportProgress) {
+        reportProgress({ phase: 'uploading', progress: '下载完成，开始上传...', percent: 0 });
+    }
+    
     const items = fs.readdirSync(downloadDir).filter(f => !f.endsWith('.torrent') && !f.endsWith('.aria2'));
     if (items.length === 0) throw new Error('No files found');
     
@@ -231,12 +241,37 @@ async function normalDownloadAndUpload(magnet, trackers, downloadDir, totalSize,
             const relativePath = path.relative(firstItem, file);
             const onedrivePath = items[0] + '/' + relativePath.replace(/\\/g, '/');
             console.log('[' + (i + 1) + '/' + allFiles.length + '] Uploading:', relativePath);
+            
+            // 报告上传进度
+            if (reportProgress) {
+                const percent = Math.round((i / allFiles.length) * 100);
+                reportProgress({ 
+                    phase: 'uploading', 
+                    progress: `上传中 [${i + 1}/${allFiles.length}] ${relativePath}`,
+                    percent,
+                    fileIndex: i + 1,
+                    fileCount: allFiles.length,
+                    currentFile: relativePath
+                });
+            }
+            
             await uploadToOneDrive(file, onedrivePath, fileStats.size, accessToken, rootPath);
             uploadedFiles.push({ name: relativePath, size: fileStats.size });
         }
+        // 上传完成
+        if (reportProgress) {
+            reportProgress({ phase: 'completed', progress: `上传完成 ${allFiles.length} 个文件`, percent: 100 });
+        }
     } else {
+        // 单文件上传
+        if (reportProgress) {
+            reportProgress({ phase: 'uploading', progress: `上传中: ${items[0]}`, percent: 50 });
+        }
         await uploadToOneDrive(firstItem, items[0], stats.size, accessToken, rootPath);
         uploadedFiles.push({ name: items[0], size: stats.size });
+        if (reportProgress) {
+            reportProgress({ phase: 'completed', progress: '上传完成', percent: 100 });
+        }
     }
     return uploadedFiles;
 }
@@ -336,8 +371,22 @@ async function streamingDownloadAndUpload(magnet, trackers, downloadDir, totalSi
         const chunkEnd = Math.min(uploadedBytes + CHUNK_SIZE, finalSize);
         await uploadChunk(uploadUrl, actualFile, uploadedBytes, chunkEnd, finalSize);
         uploadedBytes = chunkEnd;
+        // 报告上传进度
+        if (reportProgress) {
+            const percent = Math.round((uploadedBytes / finalSize) * 100);
+            reportProgress({ 
+                phase: 'streaming-upload', 
+                progress: `流式上传 ${(uploadedBytes / 1024 / 1024).toFixed(0)}MB / ${(finalSize / 1024 / 1024).toFixed(0)}MB`,
+                percent,
+                uploaded: uploadedBytes,
+                total: finalSize
+            });
+        }
     }
     console.log('Upload complete!');
+    if (reportProgress) {
+        reportProgress({ phase: 'completed', progress: '上传完成', percent: 100 });
+    }
     return [{ name: actualFileName, size: finalSize }];
 }
 
@@ -348,6 +397,10 @@ async function sequentialDownloadAndUpload(magnet, trackers, downloadDir, torren
     
     if (fileList.length === 0) {
         console.log('Getting file list...');
+        if (reportProgress) {
+            reportProgress({ phase: 'metadata', progress: '获取文件列表...', percent: 0 });
+        }
+        
         const metaArgs = [magnet, '--dir=' + downloadDir, '--bt-metadata-only=true', '--bt-save-metadata=true', '--seed-time=0'];
         if (trackers) metaArgs.push('--bt-tracker=' + trackers);
         
@@ -373,7 +426,7 @@ async function sequentialDownloadAndUpload(magnet, trackers, downloadDir, torren
             fileCount = fileList.length;
         } catch (e) {
             console.error('Failed to get file list:', e.message);
-            return normalDownloadAndUpload(magnet, trackers, downloadDir, 0, accessToken, rootPath, maxTime, stallTimeout);
+            return normalDownloadAndUpload(magnet, trackers, downloadDir, 0, accessToken, rootPath, maxTime, stallTimeout, reportProgress);
         }
     }
     
@@ -383,7 +436,21 @@ async function sequentialDownloadAndUpload(magnet, trackers, downloadDir, torren
         }
         
         const fileInfo = fileList[i];
+        const fileName = path.basename(fileInfo.path);
         console.log('[' + (i + 1) + '/' + fileCount + '] Downloading file', fileInfo.index);
+        
+        // 报告开始下载此文件
+        if (reportProgress) {
+            const overallPercent = Math.round((i / fileCount) * 100);
+            reportProgress({ 
+                phase: 'sequential-download', 
+                progress: `[${i + 1}/${fileCount}] 下载: ${fileName}`,
+                percent: overallPercent,
+                fileIndex: i + 1,
+                fileCount,
+                currentFile: fileName
+            });
+        }
         
         // Clean up
         fs.readdirSync(downloadDir).filter(f => !f.endsWith('.torrent')).forEach(f => {
@@ -423,7 +490,14 @@ async function sequentialDownloadAndUpload(magnet, trackers, downloadDir, torren
                 // 报告进度
                 const progressInfo = parseAria2Progress(str);
                 if (progressInfo && reportProgress) {
-                    reportProgress({ ...progressInfo, phase: 'sequential', fileIndex: i + 1, fileCount });
+                    reportProgress({ 
+                        ...progressInfo, 
+                        phase: 'sequential-download', 
+                        fileIndex: i + 1, 
+                        fileCount,
+                        currentFile: fileName,
+                        progress: `[${i + 1}/${fileCount}] ${progressInfo.progress}`
+                    });
                 }
             });
             aria2.stderr.on('data', (data) => console.error(data.toString()));
@@ -453,6 +527,20 @@ async function sequentialDownloadAndUpload(magnet, trackers, downloadDir, torren
         const onedrivePath = relativePath.replace(/\\/g, '/');
         
         console.log('Uploading:', onedrivePath);
+        
+        // 报告开始上传此文件
+        if (reportProgress) {
+            const overallPercent = Math.round(((i + 0.5) / fileCount) * 100);
+            reportProgress({ 
+                phase: 'sequential-upload', 
+                progress: `[${i + 1}/${fileCount}] 上传: ${fileName}`,
+                percent: overallPercent,
+                fileIndex: i + 1,
+                fileCount,
+                currentFile: fileName
+            });
+        }
+        
         await uploadToOneDrive(actualFilePath, onedrivePath, actualFileStats.size, accessToken, rootPath);
         uploadedFiles.push({ name: onedrivePath, size: actualFileStats.size });
         
@@ -462,6 +550,11 @@ async function sequentialDownloadAndUpload(magnet, trackers, downloadDir, torren
             fs.statSync(fp).isDirectory() ? fs.rmSync(fp, { recursive: true, force: true }) : fs.unlinkSync(fp);
         });
         console.log('[' + (i + 1) + '/' + fileCount + '] Done');
+    }
+    
+    // 报告全部完成
+    if (reportProgress) {
+        reportProgress({ phase: 'completed', progress: `全部完成 ${uploadedFiles.length} 个文件`, percent: 100 });
     }
     
     console.log('All', uploadedFiles.length, 'files uploaded!');
@@ -504,6 +597,20 @@ async function refreshAccessToken(clientId, clientSecret, tenantId, refreshToken
 }
 
 function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+
+// 清理文件夹名（移除特殊字符）
+function sanitizeFolderName(name) {
+    if (!name) return '';
+    
+    let cleaned = name
+        .replace(/[<>:"/\\|?*\x00-\x1f]/g, '')  // 移除 Windows/OneDrive 不允许的字符
+        .replace(/\s+/g, ' ')                    // 多个空格合并
+        .replace(/^\.+/, '')                     // 移除开头的点
+        .trim()
+        .substring(0, 200);                      // 限制长度
+    
+    return cleaned || '';
+}
 
 // 创建进度报告器
 function createProgressReporter(progressUrl, taskId) {
