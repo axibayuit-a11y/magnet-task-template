@@ -1,6 +1,6 @@
 /**
  * stream_upload.js - Magnet Download + OneDrive Upload
- * Version: 1.1
+ * Version: 1.2
  * 
  * Strategy:
  * - <=13GB: Download all then upload
@@ -8,7 +8,7 @@
  * - >13GB multi-file: Download one, upload one, delete one
  */
 
-const VERSION = '1.1';
+const VERSION = '1.2';
 
 const { spawn, execSync } = require('child_process');
 const fs = require('fs');
@@ -181,7 +181,7 @@ function getAllFiles(dirPath, arr = []) {
 
 async function normalDownloadAndUpload(magnet, trackers, downloadDir, totalSize, accessToken, onedrivePath, kvBasePath, maxTime, stallTimeout, reportProgress) {
     console.log('[Normal] Starting download...');
-    const args = [magnet, '--dir=' + downloadDir, '--file-allocation=none', '--seed-time=0', '--max-connection-per-server=16', '--bt-max-peers=150', '--summary-interval=10'];
+    const args = [magnet, '--dir=' + downloadDir, '--file-allocation=none', '--seed-time=0', '--max-connection-per-server=16', '--bt-max-peers=150', '--summary-interval=5'];
     if (trackers) args.push('--bt-tracker=' + trackers);
 
     await new Promise((resolve, reject) => {
@@ -292,9 +292,9 @@ async function normalDownloadAndUpload(magnet, trackers, downloadDir, totalSize,
         const fileKvPath = kvBasePath ? kvBasePath + '/' + fileName : fileName;
         
         if (reportProgress) {
-            reportProgress({ phase: 'uploading', progress: `上传中: ${fileName}`, percent: 50 });
+            reportProgress({ phase: 'uploading', progress: `上传中: ${fileName}`, percent: 0 });
         }
-        const uploadResult = await uploadToOneDrive(firstItem, fileName, stats.size, accessToken, onedrivePath);
+        const uploadResult = await uploadToOneDrive(firstItem, fileName, stats.size, accessToken, onedrivePath, reportProgress);
         uploadedFiles.push({ 
             name: fileName, 
             size: stats.size,
@@ -311,7 +311,7 @@ async function normalDownloadAndUpload(magnet, trackers, downloadDir, totalSize,
 
 async function streamingDownloadAndUpload(magnet, trackers, downloadDir, totalSize, accessToken, onedrivePath, kvBasePath, maxTime, stallTimeout, reportProgress) {
     console.log('[Streaming] Starting download...');
-    const args = [magnet, '--dir=' + downloadDir, '--stream-piece-selector=inorder', '--bt-prioritize-piece=head', '--file-allocation=none', '--seed-time=0', '--max-connection-per-server=16', '--bt-max-peers=150', '--summary-interval=10'];
+    const args = [magnet, '--dir=' + downloadDir, '--stream-piece-selector=inorder', '--bt-prioritize-piece=head', '--file-allocation=none', '--seed-time=0', '--max-connection-per-server=16', '--bt-max-peers=150', '--summary-interval=5'];
     if (trackers) args.push('--bt-tracker=' + trackers);
 
     const aria2 = spawn('aria2c', args);
@@ -501,7 +501,7 @@ async function sequentialDownloadAndUpload(magnet, trackers, downloadDir, torren
             fs.statSync(fp).isDirectory() ? fs.rmSync(fp, { recursive: true, force: true }) : fs.unlinkSync(fp);
         });
         
-        const args = [magnet, '--dir=' + downloadDir, '--select-file=' + fileInfo.index, '--file-allocation=none', '--seed-time=0', '--max-connection-per-server=16', '--bt-max-peers=150', '--summary-interval=10'];
+        const args = [magnet, '--dir=' + downloadDir, '--select-file=' + fileInfo.index, '--file-allocation=none', '--seed-time=0', '--max-connection-per-server=16', '--bt-max-peers=150', '--summary-interval=5'];
         if (trackers) args.push('--bt-tracker=' + trackers);
 
         await new Promise((resolve, reject) => {
@@ -614,7 +614,7 @@ async function sequentialDownloadAndUpload(magnet, trackers, downloadDir, torren
     return uploadedFiles;
 }
 
-async function uploadToOneDrive(filePath, fileName, fileSize, accessToken, basePath) {
+async function uploadToOneDrive(filePath, fileName, fileSize, accessToken, basePath, reportProgress = null) {
     const safeName = fileName.replace(/\\/g, '/');
     const fullPath = basePath + '/' + safeName;
     
@@ -631,11 +631,22 @@ async function uploadToOneDrive(filePath, fileName, fileSize, accessToken, baseP
         const session = await createUploadSession(accessToken, basePath, safeName);
         let uploaded = 0;
         let lastResponse = null;
+        let lastReportedPercent = 0;
         while (uploaded < fileSize) {
             const end = Math.min(uploaded + CHUNK_SIZE, fileSize);
             lastResponse = await uploadChunk(session.uploadUrl, filePath, uploaded, end, fileSize);
             uploaded = end;
+            const percent = Math.round((uploaded / fileSize) * 100);
             if (uploaded % (100 * 1024 * 1024) < CHUNK_SIZE) console.log('Progress:', (uploaded / 1024 / 1024).toFixed(0), 'MB');
+            // 每35%上报一次
+            if (reportProgress && percent - lastReportedPercent >= 35) {
+                lastReportedPercent = percent;
+                reportProgress({ 
+                    phase: 'uploading', 
+                    progress: `上传中 ${(uploaded / 1024 / 1024).toFixed(0)}MB / ${(fileSize / 1024 / 1024).toFixed(0)}MB`,
+                    percent
+                });
+            }
         }
         // 最后一个分片的响应包含文件信息
         return { itemId: lastResponse?.id || '', path: fullPath };
@@ -680,20 +691,23 @@ function sanitizeFolderName(name) {
 
 // 创建进度报告器
 function createProgressReporter(progressUrl, taskId) {
-    let lastReport = 0;
-    const minInterval = 5000; // 最少5秒报告一次
+    let lastReportedPercent = -10; // 上次上报的百分比
     
     return async (data) => {
         if (!progressUrl || !taskId) {
             console.log('Progress reporter: missing URL or taskId');
             return;
         }
-        const now = Date.now();
-        if (now - lastReport < minInterval) return;
-        lastReport = now;
+        
+        const currentPercent = data.percent || 0;
+        // 只有进度增加 10% 或阶段变化时才上报
+        if (currentPercent - lastReportedPercent < 10 && data.phase !== 'completed') {
+            return;
+        }
+        lastReportedPercent = currentPercent;
         
         try {
-            console.log('Reporting progress:', data.phase, data.percent + '%');
+            console.log('Reporting progress:', data.phase, currentPercent + '%');
             await axios.post(progressUrl, { taskId, ...data }, { timeout: 5000 });
             console.log('Progress reported successfully');
         } catch (e) {
