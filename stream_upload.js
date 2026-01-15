@@ -61,7 +61,8 @@ async function main() {
     let mode = !isLarge ? 'normal' : (isMultiFile ? 'sequential' : 'streaming');
     console.log('Mode:', mode);
 
-    // 构建上传基础路径：rootPath/uploadFolder/dateFolder/torrentName
+    // 构建上传基础路径：rootPath/uploadFolder/torrentName/dateFolder
+    // 统一路径结构：文件夹在前，日期在后
     const now = new Date();
     const dateFolder = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}`;
     
@@ -69,7 +70,8 @@ async function main() {
     const cleanTorrentName = sanitizeFolderName(torrentName) || `magnet_${Date.now()}`;
     console.log('Clean torrent name:', cleanTorrentName);
     
-    const uploadBasePath = [rootPath, uploadFolder, dateFolder, cleanTorrentName].filter(p => p).join('/');
+    // 路径结构：rootPath/uploadFolder/torrentName/dateFolder（文件夹在前，日期在后）
+    const uploadBasePath = [rootPath, uploadFolder, cleanTorrentName, dateFolder].filter(p => p).join('/');
     console.log('Upload path:', uploadBasePath);
 
     // 进度报告函数
