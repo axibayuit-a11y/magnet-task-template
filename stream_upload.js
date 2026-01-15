@@ -1,10 +1,14 @@
 /**
  * stream_upload.js - Magnet Download + OneDrive Upload
+ * Version: 1.1
+ * 
  * Strategy:
  * - <=13GB: Download all then upload
  * - >13GB single file: Stream upload while downloading
  * - >13GB multi-file: Download one, upload one, delete one
  */
+
+const VERSION = '1.1';
 
 const { spawn, execSync } = require('child_process');
 const fs = require('fs');
@@ -32,7 +36,7 @@ async function main() {
     // 进度回调 URL（与 callback 同域）
     const progressUrl = callbackUrl ? callbackUrl.replace('/callback', '/progress') : '';
 
-    console.log('=== Magnet Download Task ===');
+    console.log('=== Magnet Download Task v' + VERSION + ' ===');
     console.log('Magnet:', magnet?.substring(0, 80) + '...');
     console.log('Max Time:', maxTimeHours, 'hours');
     console.log('Stall Timeout:', stallTimeoutMinutes, 'minutes');
