@@ -638,9 +638,8 @@ async function uploadToOneDrive(filePath, fileName, fileSize, accessToken, baseP
             uploaded = end;
             const percent = Math.round((uploaded / fileSize) * 100);
             if (uploaded % (100 * 1024 * 1024) < CHUNK_SIZE) console.log('Progress:', (uploaded / 1024 / 1024).toFixed(0), 'MB');
-            // 每35%上报一次
-            if (reportProgress && percent - lastReportedPercent >= 35) {
-                lastReportedPercent = percent;
+            // Report progress (throttling handled by createProgressReporter)
+            if (reportProgress) {
                 reportProgress({ 
                     phase: 'uploading', 
                     progress: `上传中 ${(uploaded / 1024 / 1024).toFixed(0)}MB / ${(fileSize / 1024 / 1024).toFixed(0)}MB`,
@@ -691,19 +690,30 @@ function sanitizeFolderName(name) {
 
 // 创建进度报告器
 function createProgressReporter(progressUrl, taskId) {
-    let lastReportedPercent = -10; // 上次上报的百分比
+    let lastReportedPercent = -100;
+    let lastPhase = '';
     
     return async (data) => {
         if (!progressUrl || !taskId) {
             console.log('Progress reporter: missing URL or taskId');
             return;
         }
+
+        // Reset state on phase change
+        if (data.phase !== lastPhase) {
+            lastPhase = data.phase;
+            lastReportedPercent = -100;
+        }
         
         const currentPercent = data.percent || 0;
-        // 只有进度增加 10% 或阶段变化时才上报
-        if (currentPercent - lastReportedPercent < 10 && data.phase !== 'completed') {
+        const isUpload = data.phase && data.phase.includes('upload');
+        const threshold = isUpload ? 35 : 10;
+
+        // Apply threshold logic (always report 'completed' or 'metadata')
+        if (data.phase !== 'completed' && data.phase !== 'metadata' && (currentPercent - lastReportedPercent < threshold)) {
             return;
         }
+
         lastReportedPercent = currentPercent;
         
         try {
