@@ -677,18 +677,23 @@ function sanitizeFolderName(name) {
 // 创建进度报告器
 function createProgressReporter(progressUrl, taskId) {
     let lastReport = 0;
-    const minInterval = 10000; // 最少10秒报告一次
+    const minInterval = 5000; // 最少5秒报告一次
     
     return async (data) => {
-        if (!progressUrl || !taskId) return;
+        if (!progressUrl || !taskId) {
+            console.log('Progress reporter: missing URL or taskId');
+            return;
+        }
         const now = Date.now();
         if (now - lastReport < minInterval) return;
         lastReport = now;
         
         try {
+            console.log('Reporting progress:', data.phase, data.percent + '%');
             await axios.post(progressUrl, { taskId, ...data }, { timeout: 5000 });
+            console.log('Progress reported successfully');
         } catch (e) {
-            // 忽略报告错误
+            console.error('Progress report failed:', e.message);
         }
     };
 }
