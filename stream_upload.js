@@ -28,6 +28,9 @@ async function main() {
     const maxTimeHours = parseFloat(process.env.TIMEOUT_HOURS) || 2;
     const stallTimeoutMinutes = 30;
     const trackers = process.env.BT_TRACKERS || '';
+    
+    // 进度回调 URL（与 callback 同域）
+    const progressUrl = callbackUrl ? callbackUrl.replace('/callback', '/progress') : '';
 
     console.log('=== Magnet Download Task ===');
     console.log('Magnet:', magnet?.substring(0, 80) + '...');
@@ -58,20 +61,25 @@ async function main() {
     let mode = !isLarge ? 'normal' : (isMultiFile ? 'sequential' : 'streaming');
     console.log('Mode:', mode);
 
-    // 构建上传基础路径：rootPath/uploadFolder/torrentName
-    const uploadBasePath = [rootPath, uploadFolder, torrentName].filter(p => p).join('/');
+    // 构建上传基础路径：rootPath/uploadFolder/dateFolder/torrentName
+    const now = new Date();
+    const dateFolder = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}`;
+    const uploadBasePath = [rootPath, uploadFolder, dateFolder, torrentName].filter(p => p).join('/');
     console.log('Upload path:', uploadBasePath);
+
+    // 进度报告函数
+    const reportProgress = createProgressReporter(progressUrl, taskId);
 
     let uploadedFiles = [];
     const maxTime = maxTimeHours * 3600000;
     const stallTimeout = stallTimeoutMinutes * 60000;
     
     if (mode === 'normal') {
-        uploadedFiles = await normalDownloadAndUpload(magnet, trackers, downloadDir, totalSize, accessToken, uploadBasePath, maxTime, stallTimeout);
+        uploadedFiles = await normalDownloadAndUpload(magnet, trackers, downloadDir, totalSize, accessToken, uploadBasePath, maxTime, stallTimeout, reportProgress);
     } else if (mode === 'streaming') {
-        uploadedFiles = await streamingDownloadAndUpload(magnet, trackers, downloadDir, totalSize, accessToken, uploadBasePath, maxTime, stallTimeout);
+        uploadedFiles = await streamingDownloadAndUpload(magnet, trackers, downloadDir, totalSize, accessToken, uploadBasePath, maxTime, stallTimeout, reportProgress);
     } else {
-        uploadedFiles = await sequentialDownloadAndUpload(magnet, trackers, downloadDir, torrentName, fileList, fileCount, accessToken, uploadBasePath, maxTime, stallTimeout);
+        uploadedFiles = await sequentialDownloadAndUpload(magnet, trackers, downloadDir, torrentName, fileList, fileCount, accessToken, uploadBasePath, maxTime, stallTimeout, reportProgress);
     }
 
     if (callbackUrl) {
@@ -155,7 +163,7 @@ function getAllFiles(dirPath, arr = []) {
     return arr;
 }
 
-async function normalDownloadAndUpload(magnet, trackers, downloadDir, totalSize, accessToken, rootPath, maxTime, stallTimeout) {
+async function normalDownloadAndUpload(magnet, trackers, downloadDir, totalSize, accessToken, rootPath, maxTime, stallTimeout, reportProgress) {
     console.log('[Normal] Starting download...');
     const args = [magnet, '--dir=' + downloadDir, '--file-allocation=none', '--seed-time=0', '--max-connection-per-server=16', '--bt-max-peers=150', '--summary-interval=10'];
     if (trackers) args.push('--bt-tracker=' + trackers);
@@ -191,6 +199,11 @@ async function normalDownloadAndUpload(magnet, trackers, downloadDir, totalSize,
                     lastProgress = progress;
                     lastProgressTime = Date.now();
                 }
+            }
+            // 报告进度
+            const progressInfo = parseAria2Progress(str);
+            if (progressInfo && reportProgress) {
+                reportProgress({ ...progressInfo, phase: 'downloading' });
             }
         });
         aria2.stderr.on('data', (data) => console.error(data.toString()));
@@ -228,7 +241,7 @@ async function normalDownloadAndUpload(magnet, trackers, downloadDir, totalSize,
     return uploadedFiles;
 }
 
-async function streamingDownloadAndUpload(magnet, trackers, downloadDir, totalSize, accessToken, rootPath, maxTime, stallTimeout) {
+async function streamingDownloadAndUpload(magnet, trackers, downloadDir, totalSize, accessToken, rootPath, maxTime, stallTimeout, reportProgress) {
     console.log('[Streaming] Starting download...');
     const args = [magnet, '--dir=' + downloadDir, '--stream-piece-selector=inorder', '--bt-prioritize-piece=head', '--file-allocation=none', '--seed-time=0', '--max-connection-per-server=16', '--bt-max-peers=150', '--summary-interval=10'];
     if (trackers) args.push('--bt-tracker=' + trackers);
@@ -243,6 +256,11 @@ async function streamingDownloadAndUpload(magnet, trackers, downloadDir, totalSi
         const progressMatch = str.match(/(\d+)%/);
         if ((cnMatch && parseInt(cnMatch[1]) > 0) || progressMatch) {
             lastProgressTime = Date.now();
+        }
+        // 报告进度
+        const progressInfo = parseAria2Progress(str);
+        if (progressInfo && reportProgress) {
+            reportProgress({ ...progressInfo, phase: 'streaming' });
         }
     });
     aria2.stderr.on('data', (data) => console.error(data.toString()));
@@ -323,7 +341,7 @@ async function streamingDownloadAndUpload(magnet, trackers, downloadDir, totalSi
     return [{ name: actualFileName, size: finalSize }];
 }
 
-async function sequentialDownloadAndUpload(magnet, trackers, downloadDir, torrentName, fileList, fileCount, accessToken, rootPath, maxTime, stallTimeout) {
+async function sequentialDownloadAndUpload(magnet, trackers, downloadDir, torrentName, fileList, fileCount, accessToken, rootPath, maxTime, stallTimeout, reportProgress) {
     console.log('[Sequential] File-by-file download...');
     const uploadedFiles = [];
     const startTime = Date.now();
@@ -402,6 +420,11 @@ async function sequentialDownloadAndUpload(magnet, trackers, downloadDir, torren
                 console.log(str);
                 const cnMatch = str.match(/CN:(\d+)/);
                 if (cnMatch && parseInt(cnMatch[1]) > 0) lastProgressTime = Date.now();
+                // 报告进度
+                const progressInfo = parseAria2Progress(str);
+                if (progressInfo && reportProgress) {
+                    reportProgress({ ...progressInfo, phase: 'sequential', fileIndex: i + 1, fileCount });
+                }
             });
             aria2.stderr.on('data', (data) => console.error(data.toString()));
             aria2.on('close', (code) => { 
@@ -481,5 +504,41 @@ async function refreshAccessToken(clientId, clientSecret, tenantId, refreshToken
 }
 
 function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+
+// 创建进度报告器
+function createProgressReporter(progressUrl, taskId) {
+    let lastReport = 0;
+    const minInterval = 10000; // 最少10秒报告一次
+    
+    return async (data) => {
+        if (!progressUrl || !taskId) return;
+        const now = Date.now();
+        if (now - lastReport < minInterval) return;
+        lastReport = now;
+        
+        try {
+            await axios.post(progressUrl, { taskId, ...data }, { timeout: 5000 });
+        } catch (e) {
+            // 忽略报告错误
+        }
+    };
+}
+
+// 解析 aria2c 输出中的进度信息
+function parseAria2Progress(str) {
+    // [#ae93e1 468MiB/1.7GiB(26%) CN:37 SD:6 DL:19MiB ETA:1m6s]
+    const match = str.match(/\[#\w+\s+([\d.]+\w+)\/([\d.]+\w+)\((\d+)%\).*?DL:([\d.]+\w+).*?ETA:([^\]]+)\]/);
+    if (match) {
+        return {
+            downloaded: match[1],
+            total: match[2],
+            percent: parseInt(match[3]),
+            speed: match[4],
+            eta: match[5],
+            progress: `${match[1]}/${match[2]} (${match[3]}%) DL:${match[4]} ETA:${match[5]}`
+        };
+    }
+    return null;
+}
 
 main().catch(err => { console.error('Fatal error:', err); process.exit(1); });
