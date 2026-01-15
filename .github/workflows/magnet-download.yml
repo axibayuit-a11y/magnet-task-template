@@ -1,0 +1,63 @@
+name: Magnet To OneDrive
+
+on:
+  repository_dispatch:
+    types: [start-download]
+
+jobs:
+  download-and-upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y aria2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install npm packages
+        run: npm install axios
+
+      - name: System Info
+        run: |
+          echo "=== System Info ==="
+          echo "CPU: $(nproc) cores"
+          echo "Disk: $(df -h / | tail -1 | awk '{print $4}') available"
+          echo "================"
+
+      - name: Get Trackers
+        run: |
+          ALL_TRACKERS=""
+          XIU2=$(curl -fsSL --connect-timeout 15 "https://raw.githubusercontent.com/XIU2/TrackersListCollection/master/all.txt" 2>/dev/null | grep -v '^$' | tr '\n' ',' | sed 's/,$//' || echo "")
+          if [ -n "$XIU2" ]; then ALL_TRACKERS="$XIU2"; fi
+          NGOSANG=$(curl -fsSL --connect-timeout 15 "https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_all.txt" 2>/dev/null | grep -v '^$' | tr '\n' ',' | sed 's/,$//' || echo "")
+          if [ -n "$NGOSANG" ]; then
+            if [ -n "$ALL_TRACKERS" ]; then ALL_TRACKERS="$ALL_TRACKERS,$NGOSANG"; else ALL_TRACKERS="$NGOSANG"; fi
+          fi
+          BACKUP="udp://tracker.opentrackr.org:1337/announce,udp://open.stealth.si:80/announce"
+          if [ -n "$ALL_TRACKERS" ]; then ALL_TRACKERS="$ALL_TRACKERS,$BACKUP"; else ALL_TRACKERS="$BACKUP"; fi
+          ALL_TRACKERS=$(echo "$ALL_TRACKERS" | tr ',' '\n' | sort -u | tr '\n' ',' | sed 's/,$//')
+          echo "TRACKERS=$ALL_TRACKERS" >> $GITHUB_ENV
+
+      - name: Run Download Script
+        env:
+          MAGNET: ${{ github.event.client_payload.magnet }}
+          OD_CLIENT_ID: ${{ github.event.client_payload.od_client_id }}
+          OD_CLIENT_SECRET: ${{ github.event.client_payload.od_client_secret }}
+          OD_TENANT_ID: ${{ github.event.client_payload.od_tenant_id }}
+          OD_REFRESH_TOKEN: ${{ github.event.client_payload.od_refresh_token }}
+          OD_ROOT_PATH: ${{ github.event.client_payload.od_root_path }}
+          UPLOAD_FOLDER: ${{ github.event.client_payload.upload_folder }}
+          CALLBACK_URL: ${{ github.event.client_payload.callback_url }}
+          TASK_ID: ${{ github.event.client_payload.task_id }}
+          TIMEOUT_HOURS: ${{ github.event.client_payload.timeout_hours }}
+          BT_TRACKERS: ${{ env.TRACKERS }}
+        run: node stream_upload.js

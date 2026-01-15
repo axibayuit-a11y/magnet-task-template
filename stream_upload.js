@@ -1,284 +1,470 @@
-// stream_upload.js - 边下边传脚本
+/**
+ * stream_upload.js - Magnet Download + OneDrive Upload
+ * Strategy:
+ * - <=13GB: Download all then upload
+ * - >13GB single file: Stream upload while downloading
+ * - >13GB multi-file: Download one, upload one, delete one
+ */
+
 const { spawn, execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
 
-const CHUNK_SIZE = 30 * 1024 * 1024; // 30MB = 320KB × 96
-const POLL_INTERVAL = 3000;
-const MIN_FREE_SPACE = 2 * 1024 * 1024 * 1024; // 2GB
-const LARGE_FILE_THRESHOLD = 14 * 1024 * 1024 * 1024; // 14GB
-
-class Aria2RPC {
-    constructor(port = 6800) {
-        this.url = `http://localhost:${port}/jsonrpc`;
-    }
-
-    async call(method, params = []) {
-        const resp = await axios.post(this.url, {
-            jsonrpc: '2.0',
-            id: Date.now(),
-            method: `aria2.${method}`,
-            params: params
-        });
-        return resp.data.result;
-    }
-}
+const CHUNK_SIZE = 30 * 1024 * 1024;
+const LARGE_FILE_THRESHOLD = 13 * 1024 * 1024 * 1024;
+const POLL_INTERVAL = 5000;
 
 async function main() {
     const magnet = process.env.MAGNET;
-    const refreshToken = process.env.OD_REFRESH_TOKEN;
     const clientId = process.env.OD_CLIENT_ID;
     const clientSecret = process.env.OD_CLIENT_SECRET;
     const tenantId = process.env.OD_TENANT_ID;
+    const refreshToken = process.env.OD_REFRESH_TOKEN;
+    const rootPath = process.env.OD_ROOT_PATH || 'imgbed';
     const callbackUrl = process.env.CALLBACK_URL;
     const taskId = process.env.TASK_ID;
-    const targetFolder = process.env.TARGET_FOLDER || 'downloads';
+    const uploadFolder = process.env.UPLOAD_FOLDER || '';
+    const maxTimeHours = parseFloat(process.env.TIMEOUT_HOURS) || 2;
+    const stallTimeoutMinutes = 30;
+    const trackers = process.env.BT_TRACKERS || '';
 
-    if (!magnet) {
-        console.error('❌ MAGNET environment variable is required');
-        process.exit(1);
-    }
+    console.log('=== Magnet Download Task ===');
+    console.log('Magnet:', magnet?.substring(0, 80) + '...');
+    console.log('Max Time:', maxTimeHours, 'hours');
+    console.log('Stall Timeout:', stallTimeoutMinutes, 'minutes');
 
-    console.log('🚀 Starting magnet download...');
-    console.log(`📥 Magnet: ${magnet.substring(0, 60)}...`);
-
-    // 1. 刷新 OneDrive Access Token
     const accessToken = await refreshAccessToken(clientId, clientSecret, tenantId, refreshToken);
-    console.log('✅ OneDrive token refreshed');
+    console.log('OneDrive token refreshed');
 
-    // 2. 启动 aria2
     const downloadDir = './downloads';
     fs.mkdirSync(downloadDir, { recursive: true });
 
-    const trackers = process.env.BT_TRACKERS || '';
-    console.log(`📡 Using ${trackers.split(',').filter(t => t).length} trackers`);
+    console.log('Fetching metadata...');
+    const metadata = await fetchMetadata(magnet, trackers, downloadDir);
+    const totalSize = metadata.totalSize;
+    const torrentName = metadata.fileName;
+    const fileCount = metadata.fileCount || 1;
+    const fileList = metadata.fileList || [];
 
-    const aria2Args = [
-        '--enable-rpc',
-        '--rpc-listen-port=6800',
-        '--file-allocation=none',
-        '--seed-time=0',
-        '--dir=' + downloadDir,
-        '--max-connection-per-server=16',
-        '--bt-max-peers=100',
-        '--bt-request-peer-speed-limit=10M',
-        '--summary-interval=10',
-    ];
+    console.log('Name:', torrentName);
+    console.log('Size:', (totalSize / 1024 / 1024 / 1024).toFixed(2), 'GB');
+    console.log('Files:', fileCount);
+    console.log('Upload folder:', uploadFolder || '(root)');
 
-    if (trackers) {
-        aria2Args.push(`--bt-tracker=${trackers}`);
+    const isLarge = totalSize > LARGE_FILE_THRESHOLD;
+    const isMultiFile = fileCount > 1;
+    
+    let mode = !isLarge ? 'normal' : (isMultiFile ? 'sequential' : 'streaming');
+    console.log('Mode:', mode);
+
+    // 构建上传基础路径：rootPath/uploadFolder/torrentName
+    const uploadBasePath = [rootPath, uploadFolder, torrentName].filter(p => p).join('/');
+    console.log('Upload path:', uploadBasePath);
+
+    let uploadedFiles = [];
+    const maxTime = maxTimeHours * 3600000;
+    const stallTimeout = stallTimeoutMinutes * 60000;
+    
+    if (mode === 'normal') {
+        uploadedFiles = await normalDownloadAndUpload(magnet, trackers, downloadDir, totalSize, accessToken, uploadBasePath, maxTime, stallTimeout);
+    } else if (mode === 'streaming') {
+        uploadedFiles = await streamingDownloadAndUpload(magnet, trackers, downloadDir, totalSize, accessToken, uploadBasePath, maxTime, stallTimeout);
+    } else {
+        uploadedFiles = await sequentialDownloadAndUpload(magnet, trackers, downloadDir, torrentName, fileList, fileCount, accessToken, uploadBasePath, maxTime, stallTimeout);
     }
 
-    aria2Args.push(magnet);
+    if (callbackUrl) {
+        try {
+            await axios.post(callbackUrl, {
+                taskId,
+                status: 'completed',
+                torrentName: torrentName,
+                files: uploadedFiles.map(f => ({
+                    fileName: f.name,
+                    fileSize: f.size,
+                    itemId: f.itemId || '',
+                    path: f.path || ''
+                }))
+            });
+            console.log('Callback sent');
+        } catch (e) {
+            console.error('Callback failed:', e.message);
+        }
+    }
 
-    console.log('🚀 Starting aria2...');
-    const aria2 = spawn('aria2c', aria2Args);
-    const aria2rpc = new Aria2RPC();
+    console.log('All done!');
+}
 
-    aria2.stdout.on('data', (data) => console.log(data.toString()));
+async function fetchMetadata(magnet, trackers, downloadDir) {
+    return new Promise((resolve, reject) => {
+        const args = [magnet, '--dir=' + downloadDir, '--bt-metadata-only=true', '--bt-save-metadata=true', '--file-allocation=none', '--seed-time=0'];
+        if (trackers) args.push('--bt-tracker=' + trackers);
+
+        const aria2 = spawn('aria2c', args);
+        let fileName = '', totalSize = 0, fileCount = 1, fileList = [], output = '';
+
+        aria2.stdout.on('data', (data) => {
+            const str = data.toString();
+            output += str;
+            console.log(str);
+            const nameMatch = output.match(/Name: (.+)/);
+            const sizeMatch = output.match(/Total Length: ([\d,]+)/);
+            if (nameMatch) fileName = nameMatch[1].trim();
+            if (sizeMatch) totalSize = parseInt(sizeMatch[1].replace(/,/g, ''));
+            const filesMatch = str.match(/(\d+) files/i);
+            if (filesMatch) fileCount = parseInt(filesMatch[1]);
+        });
+
+        aria2.stderr.on('data', (data) => console.error(data.toString()));
+
+        aria2.on('close', () => {
+            const torrentFiles = fs.readdirSync(downloadDir).filter(f => f.endsWith('.torrent'));
+            if (torrentFiles.length > 0) {
+                try {
+                    const torrentPath = path.join(downloadDir, torrentFiles[0]);
+                    const showFilesOutput = execSync('aria2c --show-files "' + torrentPath + '"', { encoding: 'utf8', timeout: 30000 });
+                    const lines = showFilesOutput.split('\n');
+                    for (const line of lines) {
+                        const indexMatch = line.match(/^(\d+)\|/);
+                        const pathMatch = line.match(/path=([^|]+)/);
+                        const sizeMatch = line.match(/length=([\d]+)/);
+                        if (indexMatch && pathMatch) {
+                            fileList.push({ index: parseInt(indexMatch[1]), path: pathMatch[1], size: sizeMatch ? parseInt(sizeMatch[1]) : 0 });
+                        }
+                    }
+                    if (fileList.length > 0) fileCount = fileList.length;
+                } catch (e) { console.error('Parse error:', e.message); }
+            }
+            
+            if (fileName && totalSize > 0) resolve({ fileName, totalSize, fileCount, fileList });
+            else if (torrentFiles.length > 0) resolve({ fileName: torrentFiles[0].replace('.torrent', ''), totalSize: 1024 * 1024 * 1024, fileCount, fileList });
+            else reject(new Error('Failed to get metadata'));
+        });
+
+        setTimeout(() => { aria2.kill(); resolve({ fileName: 'download', totalSize: 1024 * 1024 * 1024, fileCount: 1, fileList: [] }); }, 120000);
+    });
+}
+
+function getAllFiles(dirPath, arr = []) {
+    fs.readdirSync(dirPath).forEach(file => {
+        const fullPath = path.join(dirPath, file);
+        if (fs.statSync(fullPath).isDirectory()) getAllFiles(fullPath, arr);
+        else if (!file.endsWith('.torrent') && !file.endsWith('.aria2')) arr.push(fullPath);
+    });
+    return arr;
+}
+
+async function normalDownloadAndUpload(magnet, trackers, downloadDir, totalSize, accessToken, rootPath, maxTime, stallTimeout) {
+    console.log('[Normal] Starting download...');
+    const args = [magnet, '--dir=' + downloadDir, '--file-allocation=none', '--seed-time=0', '--max-connection-per-server=16', '--bt-max-peers=150', '--summary-interval=10'];
+    if (trackers) args.push('--bt-tracker=' + trackers);
+
+    await new Promise((resolve, reject) => {
+        const aria2 = spawn('aria2c', args);
+        let lastProgress = 0;
+        let lastProgressTime = Date.now();
+        
+        const maxTimer = setTimeout(() => { 
+            aria2.kill(); 
+            reject(new Error('Max time exceeded (' + (maxTime / 3600000) + 'h)')); 
+        }, maxTime);
+        
+        const stallChecker = setInterval(() => {
+            if (Date.now() - lastProgressTime > stallTimeout) {
+                clearInterval(stallChecker);
+                clearTimeout(maxTimer);
+                aria2.kill();
+                reject(new Error('No progress for ' + (stallTimeout / 60000) + ' minutes'));
+            }
+        }, 30000);
+        
+        aria2.stdout.on('data', (data) => {
+            const str = data.toString();
+            console.log(str);
+            const cnMatch = str.match(/CN:(\d+)/);
+            const progressMatch = str.match(/(\d+)%/);
+            if (cnMatch && parseInt(cnMatch[1]) > 0) lastProgressTime = Date.now();
+            if (progressMatch) {
+                const progress = parseInt(progressMatch[1]);
+                if (progress > lastProgress) {
+                    lastProgress = progress;
+                    lastProgressTime = Date.now();
+                }
+            }
+        });
+        aria2.stderr.on('data', (data) => console.error(data.toString()));
+        aria2.on('close', (code) => { 
+            clearTimeout(maxTimer); 
+            clearInterval(stallChecker);
+            code === 0 ? resolve() : reject(new Error('Download failed')); 
+        });
+    });
+
+    console.log('Download complete, uploading...');
+    const items = fs.readdirSync(downloadDir).filter(f => !f.endsWith('.torrent') && !f.endsWith('.aria2'));
+    if (items.length === 0) throw new Error('No files found');
+    
+    const firstItem = path.join(downloadDir, items[0]);
+    const stats = fs.statSync(firstItem);
+    const uploadedFiles = [];
+    
+    if (stats.isDirectory()) {
+        const allFiles = getAllFiles(firstItem);
+        console.log('Multi-file:', allFiles.length, 'files');
+        for (let i = 0; i < allFiles.length; i++) {
+            const file = allFiles[i];
+            const fileStats = fs.statSync(file);
+            const relativePath = path.relative(firstItem, file);
+            const onedrivePath = items[0] + '/' + relativePath.replace(/\\/g, '/');
+            console.log('[' + (i + 1) + '/' + allFiles.length + '] Uploading:', relativePath);
+            await uploadToOneDrive(file, onedrivePath, fileStats.size, accessToken, rootPath);
+            uploadedFiles.push({ name: relativePath, size: fileStats.size });
+        }
+    } else {
+        await uploadToOneDrive(firstItem, items[0], stats.size, accessToken, rootPath);
+        uploadedFiles.push({ name: items[0], size: stats.size });
+    }
+    return uploadedFiles;
+}
+
+async function streamingDownloadAndUpload(magnet, trackers, downloadDir, totalSize, accessToken, rootPath, maxTime, stallTimeout) {
+    console.log('[Streaming] Starting download...');
+    const args = [magnet, '--dir=' + downloadDir, '--stream-piece-selector=inorder', '--bt-prioritize-piece=head', '--file-allocation=none', '--seed-time=0', '--max-connection-per-server=16', '--bt-max-peers=150', '--summary-interval=10'];
+    if (trackers) args.push('--bt-tracker=' + trackers);
+
+    const aria2 = spawn('aria2c', args);
+    let lastProgressTime = Date.now();
+    
+    aria2.stdout.on('data', (data) => {
+        const str = data.toString();
+        console.log(str);
+        const cnMatch = str.match(/CN:(\d+)/);
+        const progressMatch = str.match(/(\d+)%/);
+        if ((cnMatch && parseInt(cnMatch[1]) > 0) || progressMatch) {
+            lastProgressTime = Date.now();
+        }
+    });
     aria2.stderr.on('data', (data) => console.error(data.toString()));
 
     await sleep(5000);
 
-    // 3. 获取下载任务信息
-    let gid = null;
-    let filePath = null;
-    let totalSize = 0;
-    let useSequential = false;
-    let retries = 0;
-
-    while (!gid && retries < 60) {
-        try {
-            const active = await aria2rpc.call('tellActive');
-            if (active.length > 0) {
-                gid = active[0].gid;
-                totalSize = parseInt(active[0].totalLength);
-                if (active[0].files && active[0].files[0]) {
-                    filePath = active[0].files[0].path;
-                }
-
-                if (totalSize > LARGE_FILE_THRESHOLD) {
-                    console.log(`⚠️ Large file (${(totalSize/1024/1024/1024).toFixed(2)}GB), switching to sequential mode`);
-                    await aria2rpc.call('changeOption', [gid, {
-                        'stream-piece-selector': 'inorder',
-                        'bt-prioritize-piece': 'head'
-                    }]);
-                    useSequential = true;
-                }
-            }
-        } catch (e) {
-            // RPC not ready yet
-        }
-        retries++;
-        await sleep(2000);
-    }
-
-    if (!gid) {
-        console.error('❌ Failed to start download');
-        process.exit(1);
-    }
-
-    console.log(`📁 File: ${path.basename(filePath || 'unknown')}`);
-    console.log(`📊 Size: ${(totalSize/1024/1024/1024).toFixed(2)} GB`);
-    console.log(`📥 Mode: ${useSequential ? 'Sequential' : 'Random'}`);
-
-    // 4. 创建 OneDrive 上传会话
-    const fileName = path.basename(filePath || `download_${Date.now()}`);
-    const uploadSession = await createUploadSession(accessToken, targetFolder, fileName, totalSize);
-    const uploadUrl = uploadSession.uploadUrl;
-    console.log('✅ Upload session created');
-
-    // 5. 边下边传主循环
-    let uploadedBytes = 0;
-    let isPaused = false;
-    let isCompleted = false;
-
-    const uploadLoop = setInterval(async () => {
-        try {
-            const status = await aria2rpc.call('tellStatus', [gid]);
-            
-            if (status.status === 'complete') {
-                isCompleted = true;
-                return;
-            }
-
-            // 水位线检测
-            const freeSpace = getFreeSpace();
-            if (freeSpace < MIN_FREE_SPACE && !isPaused) {
-                console.log(`⚠️ Low disk space (${(freeSpace/1024/1024/1024).toFixed(2)}GB), pausing download`);
-                await aria2rpc.call('pause', [gid]);
-                isPaused = true;
-            }
-
-            const bitfield = status.bitfield || '';
-            const pieceLength = parseInt(status.pieceLength) || CHUNK_SIZE;
-            const uploadableEnd = getUploadablePrefix(bitfield, pieceLength, totalSize);
-
-            while (uploadedBytes + CHUNK_SIZE <= uploadableEnd) {
-                const chunkEnd = uploadedBytes + CHUNK_SIZE;
-                await uploadChunk(uploadUrl, filePath, uploadedBytes, chunkEnd, totalSize);
-                
-                if (useSequential) {
-                    truncateFile(filePath, uploadedBytes, CHUNK_SIZE);
-                }
-                
-                uploadedBytes = chunkEnd;
-                console.log(`📤 Uploaded: ${(uploadedBytes/1024/1024).toFixed(0)} MB / ${(totalSize/1024/1024).toFixed(0)} MB`);
-
-                if (isPaused) {
-                    const newFreeSpace = getFreeSpace();
-                    if (newFreeSpace > MIN_FREE_SPACE * 2) {
-                        console.log('✅ Disk space recovered, resuming download');
-                        await aria2rpc.call('unpause', [gid]);
-                        isPaused = false;
-                    }
-                }
-            }
-        } catch (err) {
-            console.error('Loop error:', err.message);
-        }
-    }, POLL_INTERVAL);
-
-    // 6. 等待完成
-    await new Promise((resolve) => {
-        aria2.on('close', resolve);
-        const checkComplete = setInterval(() => {
-            if (isCompleted) {
-                clearInterval(checkComplete);
-                resolve();
-            }
-        }, 1000);
-    });
-
-    clearInterval(uploadLoop);
-    console.log('✅ Download complete');
-
-    // 7. 上传剩余部分
-    while (uploadedBytes < totalSize) {
-        const chunkEnd = Math.min(uploadedBytes + CHUNK_SIZE, totalSize);
-        await uploadChunk(uploadUrl, filePath, uploadedBytes, chunkEnd, totalSize);
-        uploadedBytes = chunkEnd;
-        console.log(`📤 Final: ${(uploadedBytes/1024/1024).toFixed(0)} MB / ${(totalSize/1024/1024).toFixed(0)} MB`);
-    }
-
-    console.log('✅ Upload complete!');
-
-    // 8. 回调
-    if (callbackUrl) {
-        await axios.post(callbackUrl, {
-            taskId: taskId,
-            status: 'completed',
-            fileName: fileName,
-            fileSize: totalSize
-        });
-    }
-}
-
-function getUploadablePrefix(hexBitfield, pieceLength, totalSize) {
-    if (!hexBitfield) return 0;
-    
-    let binary = '';
-    for (const char of hexBitfield) {
-        binary += parseInt(char, 16).toString(2).padStart(4, '0');
-    }
-    
-    let continuousPieces = 0;
-    for (const bit of binary) {
-        if (bit === '1') {
-            continuousPieces++;
-        } else {
+    let actualFileName = '';
+    for (let i = 0; i < 60; i++) {
+        const items = fs.readdirSync(downloadDir).filter(f => !f.endsWith('.torrent') && !f.endsWith('.aria2'));
+        if (items.length > 0 && fs.statSync(path.join(downloadDir, items[0])).isFile()) {
+            actualFileName = items[0];
             break;
         }
+        await sleep(1000);
+    }
+    if (!actualFileName) throw new Error('File not found');
+
+    const uploadSession = await createUploadSession(accessToken, rootPath, actualFileName);
+    const uploadUrl = uploadSession.uploadUrl;
+    console.log('Upload session created');
+
+    let uploadedBytes = 0;
+    const uploadInterval = totalSize * 0.1;
+
+    const pollLoop = setInterval(async () => {
+        try {
+            const actualFile = path.join(downloadDir, actualFileName);
+            if (!fs.existsSync(actualFile)) return;
+            const downloadedBytes = fs.statSync(actualFile).size;
+            if (downloadedBytes - uploadedBytes >= uploadInterval || downloadedBytes >= totalSize) {
+                const uploadEnd = Math.min(downloadedBytes, totalSize);
+                while (uploadedBytes + CHUNK_SIZE <= uploadEnd) {
+                    const chunkEnd = Math.min(uploadedBytes + CHUNK_SIZE, uploadEnd);
+                    await uploadChunk(uploadUrl, actualFile, uploadedBytes, chunkEnd, totalSize);
+                    uploadedBytes = chunkEnd;
+                    console.log('Uploaded:', (uploadedBytes / 1024 / 1024).toFixed(0), 'MB');
+                }
+            }
+        } catch (e) { console.error('Poll error:', e.message); }
+    }, POLL_INTERVAL);
+
+    const stallChecker = setInterval(() => {
+        if (Date.now() - lastProgressTime > stallTimeout) {
+            clearInterval(stallChecker);
+            clearInterval(pollLoop);
+            aria2.kill();
+        }
+    }, 30000);
+
+    await new Promise((resolve, reject) => {
+        const maxTimer = setTimeout(() => { 
+            aria2.kill(); 
+            clearInterval(pollLoop); 
+            clearInterval(stallChecker);
+            reject(new Error('Max time exceeded')); 
+        }, maxTime);
+        
+        aria2.on('close', (code) => { 
+            clearTimeout(maxTimer); 
+            clearInterval(pollLoop); 
+            clearInterval(stallChecker);
+            if (Date.now() - lastProgressTime > stallTimeout) {
+                reject(new Error('No progress timeout'));
+            } else {
+                resolve();
+            }
+        });
+    });
+
+    const actualFile = path.join(downloadDir, actualFileName);
+    const finalSize = fs.statSync(actualFile).size;
+    while (uploadedBytes < finalSize) {
+        const chunkEnd = Math.min(uploadedBytes + CHUNK_SIZE, finalSize);
+        await uploadChunk(uploadUrl, actualFile, uploadedBytes, chunkEnd, finalSize);
+        uploadedBytes = chunkEnd;
+    }
+    console.log('Upload complete!');
+    return [{ name: actualFileName, size: finalSize }];
+}
+
+async function sequentialDownloadAndUpload(magnet, trackers, downloadDir, torrentName, fileList, fileCount, accessToken, rootPath, maxTime, stallTimeout) {
+    console.log('[Sequential] File-by-file download...');
+    const uploadedFiles = [];
+    const startTime = Date.now();
+    
+    if (fileList.length === 0) {
+        console.log('Getting file list...');
+        const metaArgs = [magnet, '--dir=' + downloadDir, '--bt-metadata-only=true', '--bt-save-metadata=true', '--seed-time=0'];
+        if (trackers) metaArgs.push('--bt-tracker=' + trackers);
+        
+        await new Promise((resolve) => {
+            const aria2 = spawn('aria2c', metaArgs);
+            aria2.stdout.on('data', (data) => console.log(data.toString()));
+            aria2.stderr.on('data', (data) => console.error(data.toString()));
+            aria2.on('close', () => resolve());
+            setTimeout(() => { aria2.kill(); resolve(); }, 60000);
+        });
+        
+        const torrentFiles = fs.readdirSync(downloadDir).filter(f => f.endsWith('.torrent'));
+        if (torrentFiles.length === 0) throw new Error('No torrent file');
+        
+        try {
+            const showFilesOutput = execSync('aria2c --show-files "' + path.join(downloadDir, torrentFiles[0]) + '"', { encoding: 'utf8', timeout: 30000 });
+            for (const line of showFilesOutput.split('\n')) {
+                const indexMatch = line.match(/^(\d+)\|/);
+                const pathMatch = line.match(/path=([^|]+)/);
+                const sizeMatch = line.match(/length=([\d]+)/);
+                if (indexMatch && pathMatch) fileList.push({ index: parseInt(indexMatch[1]), path: pathMatch[1], size: sizeMatch ? parseInt(sizeMatch[1]) : 0 });
+            }
+            fileCount = fileList.length;
+        } catch (e) {
+            console.error('Failed to get file list:', e.message);
+            return normalDownloadAndUpload(magnet, trackers, downloadDir, 0, accessToken, rootPath, maxTime, stallTimeout);
+        }
     }
     
-    return Math.min(continuousPieces * pieceLength, totalSize);
+    for (let i = 0; i < fileList.length; i++) {
+        if (Date.now() - startTime > maxTime) {
+            throw new Error('Max time exceeded');
+        }
+        
+        const fileInfo = fileList[i];
+        console.log('[' + (i + 1) + '/' + fileCount + '] Downloading file', fileInfo.index);
+        
+        // Clean up
+        fs.readdirSync(downloadDir).filter(f => !f.endsWith('.torrent')).forEach(f => {
+            const fp = path.join(downloadDir, f);
+            fs.statSync(fp).isDirectory() ? fs.rmSync(fp, { recursive: true, force: true }) : fs.unlinkSync(fp);
+        });
+        
+        const args = [magnet, '--dir=' + downloadDir, '--select-file=' + fileInfo.index, '--file-allocation=none', '--seed-time=0', '--max-connection-per-server=16', '--bt-max-peers=150', '--summary-interval=10'];
+        if (trackers) args.push('--bt-tracker=' + trackers);
+
+        await new Promise((resolve, reject) => {
+            const aria2 = spawn('aria2c', args);
+            let lastProgressTime = Date.now();
+            
+            const remainingTime = maxTime - (Date.now() - startTime);
+            const perFileTime = Math.max(remainingTime / (fileCount - i) * 2, stallTimeout * 2);
+            
+            const maxTimer = setTimeout(() => { 
+                aria2.kill(); 
+                reject(new Error('File timeout')); 
+            }, perFileTime);
+            
+            const stallChecker = setInterval(() => {
+                if (Date.now() - lastProgressTime > stallTimeout) {
+                    clearInterval(stallChecker);
+                    clearTimeout(maxTimer);
+                    aria2.kill();
+                    reject(new Error('No progress for file ' + fileInfo.index));
+                }
+            }, 30000);
+            
+            aria2.stdout.on('data', (data) => {
+                const str = data.toString();
+                console.log(str);
+                const cnMatch = str.match(/CN:(\d+)/);
+                if (cnMatch && parseInt(cnMatch[1]) > 0) lastProgressTime = Date.now();
+            });
+            aria2.stderr.on('data', (data) => console.error(data.toString()));
+            aria2.on('close', (code) => { 
+                clearTimeout(maxTimer); 
+                clearInterval(stallChecker);
+                code === 0 ? resolve() : reject(new Error('Download failed')); 
+            });
+        });
+
+        const downloadedItems = fs.readdirSync(downloadDir).filter(f => !f.endsWith('.torrent') && !f.endsWith('.aria2'));
+        if (downloadedItems.length === 0) { console.error('File not found'); continue; }
+        
+        let actualFilePath = '';
+        const firstItem = path.join(downloadDir, downloadedItems[0]);
+        if (fs.statSync(firstItem).isDirectory()) {
+            const allFiles = getAllFiles(firstItem);
+            if (allFiles.length > 0) actualFilePath = allFiles[0];
+        } else {
+            actualFilePath = firstItem;
+        }
+        
+        if (!actualFilePath || !fs.existsSync(actualFilePath)) { console.error('Cannot find file'); continue; }
+        
+        const actualFileStats = fs.statSync(actualFilePath);
+        const relativePath = path.relative(downloadDir, actualFilePath);
+        const onedrivePath = relativePath.replace(/\\/g, '/');
+        
+        console.log('Uploading:', onedrivePath);
+        await uploadToOneDrive(actualFilePath, onedrivePath, actualFileStats.size, accessToken, rootPath);
+        uploadedFiles.push({ name: onedrivePath, size: actualFileStats.size });
+        
+        // Delete uploaded file
+        downloadedItems.forEach(f => {
+            const fp = path.join(downloadDir, f);
+            fs.statSync(fp).isDirectory() ? fs.rmSync(fp, { recursive: true, force: true }) : fs.unlinkSync(fp);
+        });
+        console.log('[' + (i + 1) + '/' + fileCount + '] Done');
+    }
+    
+    console.log('All', uploadedFiles.length, 'files uploaded!');
+    return uploadedFiles;
 }
 
-function getFreeSpace() {
-    try {
-        const output = execSync("df -B1 . | tail -1 | awk '{print $4}'").toString().trim();
-        return parseInt(output);
-    } catch {
-        return Infinity;
+async function uploadToOneDrive(filePath, fileName, fileSize, accessToken, basePath) {
+    const safeName = fileName.replace(/\\/g, '/');
+    if (fileSize <= 4 * 1024 * 1024) {
+        await axios.put('https://graph.microsoft.com/v1.0/me/drive/root:/' + basePath + '/' + safeName + ':/content', fs.readFileSync(filePath), { headers: { 'Authorization': 'Bearer ' + accessToken } });
+    } else {
+        const session = await createUploadSession(accessToken, basePath, safeName);
+        let uploaded = 0;
+        while (uploaded < fileSize) {
+            const end = Math.min(uploaded + CHUNK_SIZE, fileSize);
+            await uploadChunk(session.uploadUrl, filePath, uploaded, end, fileSize);
+            uploaded = end;
+            if (uploaded % (100 * 1024 * 1024) < CHUNK_SIZE) console.log('Progress:', (uploaded / 1024 / 1024).toFixed(0), 'MB');
+        }
     }
 }
 
-function truncateFile(filePath, offset, length) {
-    try {
-        execSync(`fallocate -p -o ${offset} -l ${length} "${filePath}"`, { stdio: 'ignore' });
-    } catch {
-        // Ignore
-    }
-}
-
-async function refreshAccessToken(clientId, clientSecret, tenantId, refreshToken) {
-    const resp = await axios.post(
-        `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`,
-        new URLSearchParams({
-            client_id: clientId,
-            client_secret: clientSecret,
-            refresh_token: refreshToken,
-            grant_type: 'refresh_token'
-        }),
-        { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
-    );
-    return resp.data.access_token;
-}
-
-async function createUploadSession(accessToken, folder, fileName, fileSize) {
-    const filePath = `${folder}/${fileName}`;
-    const resp = await axios.post(
-        `https://graph.microsoft.com/v1.0/me/drive/root:/${filePath}:/createUploadSession`,
-        { 
-            item: { 
-                '@microsoft.graph.conflictBehavior': 'rename',
-                name: fileName
-            }
-        },
-        { headers: { 'Authorization': `Bearer ${accessToken}` } }
-    );
-    return resp.data;
+async function createUploadSession(accessToken, basePath, fileName) {
+    const safeName = fileName.replace(/\\/g, '/');
+    const response = await axios.post('https://graph.microsoft.com/v1.0/me/drive/root:/' + basePath + '/' + safeName + ':/createUploadSession', { item: { '@microsoft.graph.conflictBehavior': 'rename' } }, { headers: { 'Authorization': 'Bearer ' + accessToken } });
+    return response.data;
 }
 
 async function uploadChunk(uploadUrl, filePath, start, end, totalSize) {
@@ -286,22 +472,14 @@ async function uploadChunk(uploadUrl, filePath, start, end, totalSize) {
     const buffer = Buffer.alloc(end - start);
     fs.readSync(fd, buffer, 0, end - start, start);
     fs.closeSync(fd);
-
-    await axios.put(uploadUrl, buffer, {
-        headers: {
-            'Content-Length': end - start,
-            'Content-Range': `bytes ${start}-${end - 1}/${totalSize}`
-        },
-        maxBodyLength: Infinity,
-        maxContentLength: Infinity
-    });
+    await axios.put(uploadUrl, buffer, { headers: { 'Content-Length': end - start, 'Content-Range': 'bytes ' + start + '-' + (end - 1) + '/' + totalSize }, maxBodyLength: Infinity, maxContentLength: Infinity });
 }
 
-function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
+async function refreshAccessToken(clientId, clientSecret, tenantId, refreshToken) {
+    const response = await axios.post('https://login.microsoftonline.com/' + tenantId + '/oauth2/v2.0/token', new URLSearchParams({ client_id: clientId, client_secret: clientSecret, refresh_token: refreshToken, grant_type: 'refresh_token' }), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+    return response.data.access_token;
 }
 
-main().catch(err => {
-    console.error('❌ Fatal error:', err);
-    process.exit(1);
-});
+function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+
+main().catch(err => { console.error('Fatal error:', err); process.exit(1); });

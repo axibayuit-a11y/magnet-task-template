@@ -1,16 +1,20 @@
-# Magnet Task
+# Magnet Task Template
 
-磁力链接下载并上传到 OneDrive 的自动化任务。
+磁力链接转存 OneDrive 的 GitHub Actions 模板仓库。
+
+## 功能
+
+- 通过 GitHub Actions 下载磁力链接
+- 自动上传到 OneDrive
+- 支持大文件流式上传
+- 支持多文件种子
 
 ## 使用方式
 
-通过 API 触发 `api_trigger_magnet` 事件，传入以下环境变量：
+此仓库由 [ImgBed](https://github.com/MarSevworker/CloudFlare-ImgBed) 自动 Fork 和调用，无需手动操作。
 
-- `MAGNET`: 磁力链接
-- `OD_REFRESH_TOKEN`: OneDrive Refresh Token
-- `OD_CLIENT_ID`: OneDrive Client ID
-- `OD_CLIENT_SECRET`: OneDrive Client Secret
-- `OD_TENANT_ID`: OneDrive Tenant ID
-- `TARGET_FOLDER`: 目标文件夹（可选，默认 downloads）
-- `CALLBACK_URL`: 完成回调 URL（可选）
-- `TASK_ID`: 任务 ID（可选）
+## 策略
+
+- ≤13GB：全部下载后上传
+- >13GB 单文件：边下边传（流式）
+- >13GB 多文件：逐个下载上传删除
