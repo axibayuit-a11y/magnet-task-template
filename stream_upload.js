@@ -203,23 +203,29 @@ async function normalDownloadAndUpload(magnet, trackers, downloadDir, totalSize,
             }
         }, 30000);
         
+        let buffer = '';
         aria2.stdout.on('data', (data) => {
-            const str = data.toString();
-            console.log(str);
-            const cnMatch = str.match(/CN:(\d+)/);
-            const progressMatch = str.match(/(\d+)%/);
-            if (cnMatch && parseInt(cnMatch[1]) > 0) lastProgressTime = Date.now();
-            if (progressMatch) {
-                const progress = parseInt(progressMatch[1]);
-                if (progress > lastProgress) {
-                    lastProgress = progress;
-                    lastProgressTime = Date.now();
+            buffer += data.toString();
+            const lines = buffer.split('\n');
+            buffer = lines.pop(); // Keep incomplete line in buffer
+            
+            for (const str of lines) {
+                console.log(str);
+                const cnMatch = str.match(/CN:(\d+)/);
+                const progressMatch = str.match(/(\d+)%/);
+                if (cnMatch && parseInt(cnMatch[1]) > 0) lastProgressTime = Date.now();
+                if (progressMatch) {
+                    const progress = parseInt(progressMatch[1]);
+                    if (progress > lastProgress) {
+                        lastProgress = progress;
+                        lastProgressTime = Date.now();
+                    }
                 }
-            }
-            // 报告进度
-            const progressInfo = parseAria2Progress(str);
-            if (progressInfo && reportProgress) {
-                reportProgress({ ...progressInfo, phase: 'downloading' });
+                // 报告进度
+                const progressInfo = parseAria2Progress(str);
+                if (progressInfo && reportProgress) {
+                    reportProgress({ ...progressInfo, phase: 'downloading' });
+                }
             }
         });
         aria2.stderr.on('data', (data) => console.error(data.toString()));
@@ -688,40 +694,61 @@ function sanitizeFolderName(name) {
     return cleaned || '';
 }
 
-// 创建进度报告器
+// 创建进度报告器 (带并发控制和重试机制)
 function createProgressReporter(progressUrl, taskId) {
     let lastReportedPercent = -100;
     let lastPhase = '';
+    let isReporting = false;
+    let nextReport = null;
     
-    return async (data) => {
-        if (!progressUrl || !taskId) {
-            console.log('Progress reporter: missing URL or taskId');
-            return;
-        }
-
-        // Reset state on phase change
-        if (data.phase !== lastPhase) {
+    // 实际发送请求的函数
+    const processQueue = async () => {
+        if (isReporting || !nextReport) return;
+        
+        isReporting = true;
+        const data = nextReport;
+        nextReport = null; // 清空队列，只处理最新的
+        
+        try {
+            console.log(`Reporting progress (${data.phase}): ${data.percent}%`);
+            await axios.post(progressUrl, { taskId, ...data }, { timeout: 10000 }); // 增加超时到10s
+            console.log('Progress reported successfully');
+            
+            // 只有成功才更新标记
+            lastReportedPercent = data.percent || 0;
             lastPhase = data.phase;
+        } catch (e) {
+            console.error('Progress report failed:', e.message);
+            // 失败不更新 lastReportedPercent，下次有机会重试
+        } finally {
+            isReporting = false;
+            // 如果在发送期间有新数据进来，继续处理
+            if (nextReport) processQueue();
+        }
+    };
+
+    return (data) => {
+        if (!progressUrl || !taskId) return;
+
+        // 阶段变化强制重置
+        if (data.phase !== lastPhase && lastPhase !== '') {
             lastReportedPercent = -100;
         }
-        
+
         const currentPercent = data.percent || 0;
         const isUpload = data.phase && data.phase.includes('upload');
         const threshold = isUpload ? 35 : 10;
-
-        // Apply threshold logic (always report 'completed' or 'metadata')
-        if (data.phase !== 'completed' && data.phase !== 'metadata' && (currentPercent - lastReportedPercent < threshold)) {
-            return;
-        }
-
-        lastReportedPercent = currentPercent;
         
-        try {
-            console.log('Reporting progress:', data.phase, currentPercent + '%');
-            await axios.post(progressUrl, { taskId, ...data }, { timeout: 5000 });
-            console.log('Progress reported successfully');
-        } catch (e) {
-            console.error('Progress report failed:', e.message);
+        // 关键事件强制上报：完成、元数据、或者达到阈值
+        const isImportant = 
+            data.phase === 'completed' || 
+            data.phase === 'metadata' ||
+            data.phase !== lastPhase || 
+            (currentPercent - lastReportedPercent >= threshold);
+
+        if (isImportant) {
+            nextReport = data;
+            processQueue();
         }
     };
 }
