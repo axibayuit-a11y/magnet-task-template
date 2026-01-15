@@ -61,18 +61,18 @@ async function main() {
     let mode = !isLarge ? 'normal' : (isMultiFile ? 'sequential' : 'streaming');
     console.log('Mode:', mode);
 
-    // 构建上传基础路径：rootPath/uploadFolder/torrentName/dateFolder
-    // 统一路径结构：文件夹在前，日期在后
+    // 构建 OneDrive 上传基础路径：rootPath/uploadFolder/dateFolder
+    // 磁力内容会保持原有结构追加在后面
     const now = new Date();
     const dateFolder = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}`;
     
-    // 清理种子名（移除特殊字符）
-    const cleanTorrentName = sanitizeFolderName(torrentName) || `magnet_${Date.now()}`;
-    console.log('Clean torrent name:', cleanTorrentName);
+    // OneDrive 路径：rootPath/uploadFolder/dateFolder/[磁力原有结构]
+    const onedrivePath = [rootPath, uploadFolder, dateFolder].filter(p => p).join('/');
+    // 图床 KV 路径：uploadFolder/[磁力原有结构]（不含 rootPath 和 dateFolder）
+    const kvBasePath = uploadFolder || '';
     
-    // 路径结构：rootPath/uploadFolder/torrentName/dateFolder（文件夹在前，日期在后）
-    const uploadBasePath = [rootPath, uploadFolder, cleanTorrentName, dateFolder].filter(p => p).join('/');
-    console.log('Upload path:', uploadBasePath);
+    console.log('OneDrive base path:', onedrivePath);
+    console.log('KV base path:', kvBasePath || '(root)');
 
     // 进度报告函数
     const reportProgress = createProgressReporter(progressUrl, taskId);
@@ -82,11 +82,11 @@ async function main() {
     const stallTimeout = stallTimeoutMinutes * 60000;
     
     if (mode === 'normal') {
-        uploadedFiles = await normalDownloadAndUpload(magnet, trackers, downloadDir, totalSize, accessToken, uploadBasePath, maxTime, stallTimeout, reportProgress);
+        uploadedFiles = await normalDownloadAndUpload(magnet, trackers, downloadDir, totalSize, accessToken, onedrivePath, kvBasePath, maxTime, stallTimeout, reportProgress);
     } else if (mode === 'streaming') {
-        uploadedFiles = await streamingDownloadAndUpload(magnet, trackers, downloadDir, totalSize, accessToken, uploadBasePath, maxTime, stallTimeout, reportProgress);
+        uploadedFiles = await streamingDownloadAndUpload(magnet, trackers, downloadDir, totalSize, accessToken, onedrivePath, kvBasePath, maxTime, stallTimeout, reportProgress);
     } else {
-        uploadedFiles = await sequentialDownloadAndUpload(magnet, trackers, downloadDir, torrentName, fileList, fileCount, accessToken, uploadBasePath, maxTime, stallTimeout, reportProgress);
+        uploadedFiles = await sequentialDownloadAndUpload(magnet, trackers, downloadDir, torrentName, fileList, fileCount, accessToken, onedrivePath, kvBasePath, maxTime, stallTimeout, reportProgress);
     }
 
     if (callbackUrl) {
@@ -95,11 +95,13 @@ async function main() {
                 taskId,
                 status: 'completed',
                 torrentName: torrentName,
+                uploadFolder: uploadFolder,
                 files: uploadedFiles.map(f => ({
-                    fileName: f.name,
+                    fileName: f.name,        // 文件名
                     fileSize: f.size,
                     itemId: f.itemId || '',
-                    path: f.path || ''
+                    onedrivePath: f.onedrivePath || '',  // OneDrive 完整路径
+                    kvPath: f.kvPath || ''               // 图床 KV 的 fileId
                 }))
             });
             console.log('Callback sent');
@@ -170,7 +172,7 @@ function getAllFiles(dirPath, arr = []) {
     return arr;
 }
 
-async function normalDownloadAndUpload(magnet, trackers, downloadDir, totalSize, accessToken, rootPath, maxTime, stallTimeout, reportProgress) {
+async function normalDownloadAndUpload(magnet, trackers, downloadDir, totalSize, accessToken, onedrivePath, kvBasePath, maxTime, stallTimeout, reportProgress) {
     console.log('[Normal] Starting download...');
     const args = [magnet, '--dir=' + downloadDir, '--file-allocation=none', '--seed-time=0', '--max-connection-per-server=16', '--bt-max-peers=150', '--summary-interval=10'];
     if (trackers) args.push('--bt-tracker=' + trackers);
@@ -235,13 +237,19 @@ async function normalDownloadAndUpload(magnet, trackers, downloadDir, totalSize,
     const uploadedFiles = [];
     
     if (stats.isDirectory()) {
+        // 多文件：磁力原有结构是 torrentName/file.mkv
+        const torrentName = items[0];
         const allFiles = getAllFiles(firstItem);
         console.log('Multi-file:', allFiles.length, 'files');
         for (let i = 0; i < allFiles.length; i++) {
             const file = allFiles[i];
             const fileStats = fs.statSync(file);
-            const relativePath = path.relative(firstItem, file);
-            const onedrivePath = items[0] + '/' + relativePath.replace(/\\/g, '/');
+            const relativePath = path.relative(firstItem, file).replace(/\\/g, '/');
+            // OneDrive: onedrivePath/torrentName/relativePath
+            const fileOnedrivePath = torrentName + '/' + relativePath;
+            // KV: kvBasePath/torrentName/relativePath (不含日期)
+            const fileKvPath = kvBasePath ? kvBasePath + '/' + torrentName + '/' + relativePath : torrentName + '/' + relativePath;
+            
             console.log('[' + (i + 1) + '/' + allFiles.length + '] Uploading:', relativePath);
             
             // 报告上传进度
@@ -257,20 +265,36 @@ async function normalDownloadAndUpload(magnet, trackers, downloadDir, totalSize,
                 });
             }
             
-            await uploadToOneDrive(file, onedrivePath, fileStats.size, accessToken, rootPath);
-            uploadedFiles.push({ name: relativePath, size: fileStats.size });
+            const uploadResult = await uploadToOneDrive(file, fileOnedrivePath, fileStats.size, accessToken, onedrivePath);
+            uploadedFiles.push({ 
+                name: relativePath, 
+                size: fileStats.size,
+                itemId: uploadResult.itemId,
+                onedrivePath: uploadResult.path,
+                kvPath: fileKvPath
+            });
         }
         // 上传完成
         if (reportProgress) {
             reportProgress({ phase: 'completed', progress: `上传完成 ${allFiles.length} 个文件`, percent: 100 });
         }
     } else {
-        // 单文件上传
+        // 单文件：直接放在 kvBasePath 下
+        const fileName = items[0];
+        // KV: kvBasePath/fileName (不含日期)
+        const fileKvPath = kvBasePath ? kvBasePath + '/' + fileName : fileName;
+        
         if (reportProgress) {
-            reportProgress({ phase: 'uploading', progress: `上传中: ${items[0]}`, percent: 50 });
+            reportProgress({ phase: 'uploading', progress: `上传中: ${fileName}`, percent: 50 });
         }
-        await uploadToOneDrive(firstItem, items[0], stats.size, accessToken, rootPath);
-        uploadedFiles.push({ name: items[0], size: stats.size });
+        const uploadResult = await uploadToOneDrive(firstItem, fileName, stats.size, accessToken, onedrivePath);
+        uploadedFiles.push({ 
+            name: fileName, 
+            size: stats.size,
+            itemId: uploadResult.itemId,
+            onedrivePath: uploadResult.path,
+            kvPath: fileKvPath
+        });
         if (reportProgress) {
             reportProgress({ phase: 'completed', progress: '上传完成', percent: 100 });
         }
@@ -278,7 +302,7 @@ async function normalDownloadAndUpload(magnet, trackers, downloadDir, totalSize,
     return uploadedFiles;
 }
 
-async function streamingDownloadAndUpload(magnet, trackers, downloadDir, totalSize, accessToken, rootPath, maxTime, stallTimeout, reportProgress) {
+async function streamingDownloadAndUpload(magnet, trackers, downloadDir, totalSize, accessToken, onedrivePath, kvBasePath, maxTime, stallTimeout, reportProgress) {
     console.log('[Streaming] Starting download...');
     const args = [magnet, '--dir=' + downloadDir, '--stream-piece-selector=inorder', '--bt-prioritize-piece=head', '--file-allocation=none', '--seed-time=0', '--max-connection-per-server=16', '--bt-max-peers=150', '--summary-interval=10'];
     if (trackers) args.push('--bt-tracker=' + trackers);
@@ -315,7 +339,7 @@ async function streamingDownloadAndUpload(magnet, trackers, downloadDir, totalSi
     }
     if (!actualFileName) throw new Error('File not found');
 
-    const uploadSession = await createUploadSession(accessToken, rootPath, actualFileName);
+    const uploadSession = await createUploadSession(accessToken, onedrivePath, actualFileName);
     const uploadUrl = uploadSession.uploadUrl;
     console.log('Upload session created');
 
@@ -369,9 +393,10 @@ async function streamingDownloadAndUpload(magnet, trackers, downloadDir, totalSi
 
     const actualFile = path.join(downloadDir, actualFileName);
     const finalSize = fs.statSync(actualFile).size;
+    let lastChunkResponse = null;
     while (uploadedBytes < finalSize) {
         const chunkEnd = Math.min(uploadedBytes + CHUNK_SIZE, finalSize);
-        await uploadChunk(uploadUrl, actualFile, uploadedBytes, chunkEnd, finalSize);
+        lastChunkResponse = await uploadChunk(uploadUrl, actualFile, uploadedBytes, chunkEnd, finalSize);
         uploadedBytes = chunkEnd;
         // 报告上传进度
         if (reportProgress) {
@@ -389,10 +414,19 @@ async function streamingDownloadAndUpload(magnet, trackers, downloadDir, totalSi
     if (reportProgress) {
         reportProgress({ phase: 'completed', progress: '上传完成', percent: 100 });
     }
-    return [{ name: actualFileName, size: finalSize }];
+    
+    // 单文件流式上传
+    const fileKvPath = kvBasePath ? kvBasePath + '/' + actualFileName : actualFileName;
+    return [{ 
+        name: actualFileName, 
+        size: finalSize,
+        itemId: lastChunkResponse?.id || '',
+        onedrivePath: onedrivePath + '/' + actualFileName,
+        kvPath: fileKvPath
+    }];
 }
 
-async function sequentialDownloadAndUpload(magnet, trackers, downloadDir, torrentName, fileList, fileCount, accessToken, rootPath, maxTime, stallTimeout, reportProgress) {
+async function sequentialDownloadAndUpload(magnet, trackers, downloadDir, torrentName, fileList, fileCount, accessToken, onedrivePath, kvBasePath, maxTime, stallTimeout, reportProgress) {
     console.log('[Sequential] File-by-file download...');
     const uploadedFiles = [];
     const startTime = Date.now();
@@ -428,7 +462,7 @@ async function sequentialDownloadAndUpload(magnet, trackers, downloadDir, torren
             fileCount = fileList.length;
         } catch (e) {
             console.error('Failed to get file list:', e.message);
-            return normalDownloadAndUpload(magnet, trackers, downloadDir, 0, accessToken, rootPath, maxTime, stallTimeout, reportProgress);
+            return normalDownloadAndUpload(magnet, trackers, downloadDir, 0, accessToken, onedrivePath, kvBasePath, maxTime, stallTimeout, reportProgress);
         }
     }
     
@@ -525,10 +559,10 @@ async function sequentialDownloadAndUpload(magnet, trackers, downloadDir, torren
         if (!actualFilePath || !fs.existsSync(actualFilePath)) { console.error('Cannot find file'); continue; }
         
         const actualFileStats = fs.statSync(actualFilePath);
-        const relativePath = path.relative(downloadDir, actualFilePath);
-        const onedrivePath = relativePath.replace(/\\/g, '/');
+        // relativePath 是相对于 downloadDir 的路径，保持磁力原有结构
+        const relativePath = path.relative(downloadDir, actualFilePath).replace(/\\/g, '/');
         
-        console.log('Uploading:', onedrivePath);
+        console.log('Uploading:', relativePath);
         
         // 报告开始上传此文件
         if (reportProgress) {
@@ -543,8 +577,18 @@ async function sequentialDownloadAndUpload(magnet, trackers, downloadDir, torren
             });
         }
         
-        await uploadToOneDrive(actualFilePath, onedrivePath, actualFileStats.size, accessToken, rootPath);
-        uploadedFiles.push({ name: onedrivePath, size: actualFileStats.size });
+        // OneDrive: onedrivePath/relativePath
+        // KV: kvBasePath/relativePath (不含日期)
+        const fileKvPath = kvBasePath ? kvBasePath + '/' + relativePath : relativePath;
+        
+        const uploadResult = await uploadToOneDrive(actualFilePath, relativePath, actualFileStats.size, accessToken, onedrivePath);
+        uploadedFiles.push({ 
+            name: relativePath, 
+            size: actualFileStats.size,
+            itemId: uploadResult.itemId,
+            onedrivePath: uploadResult.path,
+            kvPath: fileKvPath
+        });
         
         // Delete uploaded file
         downloadedItems.forEach(f => {
@@ -565,17 +609,29 @@ async function sequentialDownloadAndUpload(magnet, trackers, downloadDir, torren
 
 async function uploadToOneDrive(filePath, fileName, fileSize, accessToken, basePath) {
     const safeName = fileName.replace(/\\/g, '/');
+    const fullPath = basePath + '/' + safeName;
+    
     if (fileSize <= 4 * 1024 * 1024) {
-        await axios.put('https://graph.microsoft.com/v1.0/me/drive/root:/' + basePath + '/' + safeName + ':/content', fs.readFileSync(filePath), { headers: { 'Authorization': 'Bearer ' + accessToken } });
+        // 小文件直接上传
+        const response = await axios.put(
+            'https://graph.microsoft.com/v1.0/me/drive/root:/' + fullPath + ':/content',
+            fs.readFileSync(filePath),
+            { headers: { 'Authorization': 'Bearer ' + accessToken } }
+        );
+        return { itemId: response.data.id, path: fullPath };
     } else {
+        // 大文件分片上传
         const session = await createUploadSession(accessToken, basePath, safeName);
         let uploaded = 0;
+        let lastResponse = null;
         while (uploaded < fileSize) {
             const end = Math.min(uploaded + CHUNK_SIZE, fileSize);
-            await uploadChunk(session.uploadUrl, filePath, uploaded, end, fileSize);
+            lastResponse = await uploadChunk(session.uploadUrl, filePath, uploaded, end, fileSize);
             uploaded = end;
             if (uploaded % (100 * 1024 * 1024) < CHUNK_SIZE) console.log('Progress:', (uploaded / 1024 / 1024).toFixed(0), 'MB');
         }
+        // 最后一个分片的响应包含文件信息
+        return { itemId: lastResponse?.id || '', path: fullPath };
     }
 }
 
@@ -590,7 +646,8 @@ async function uploadChunk(uploadUrl, filePath, start, end, totalSize) {
     const buffer = Buffer.alloc(end - start);
     fs.readSync(fd, buffer, 0, end - start, start);
     fs.closeSync(fd);
-    await axios.put(uploadUrl, buffer, { headers: { 'Content-Length': end - start, 'Content-Range': 'bytes ' + start + '-' + (end - 1) + '/' + totalSize }, maxBodyLength: Infinity, maxContentLength: Infinity });
+    const response = await axios.put(uploadUrl, buffer, { headers: { 'Content-Length': end - start, 'Content-Range': 'bytes ' + start + '-' + (end - 1) + '/' + totalSize }, maxBodyLength: Infinity, maxContentLength: Infinity });
+    return response.data; // 返回响应数据，最后一个分片包含文件信息
 }
 
 async function refreshAccessToken(clientId, clientSecret, tenantId, refreshToken) {
