@@ -66,10 +66,13 @@ async function main() {
     const now = new Date();
     const dateFolder = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}`;
     
+    // 清理 uploadFolder 的前后斜杠
+    const cleanUploadFolder = (uploadFolder || '').replace(/^\/+/, '').replace(/\/+$/, '');
+    
     // OneDrive 路径：rootPath/uploadFolder/dateFolder/[磁力原有结构]
-    const onedrivePath = [rootPath, uploadFolder, dateFolder].filter(p => p).join('/');
+    const onedrivePath = [rootPath, cleanUploadFolder, dateFolder].filter(p => p).join('/');
     // 图床 KV 路径：uploadFolder/[磁力原有结构]（不含 rootPath 和 dateFolder）
-    const kvBasePath = uploadFolder || '';
+    const kvBasePath = cleanUploadFolder;
     
     console.log('OneDrive base path:', onedrivePath);
     console.log('KV base path:', kvBasePath || '(root)');
