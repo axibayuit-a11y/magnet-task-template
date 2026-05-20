@@ -109,7 +109,23 @@
               fi
               APPIMAGE_EXTRACT_AND_RUN=1 xvfb-run -a /usr/local/bin/qbittorrent-release $QBT_ARGS > /tmp/qbt.log 2>&1 &
               QBT_PID=$!
-              sleep 8
+              # 等到 Web API 可访问再登录，避免 runner 慢启动时误判失败。
+              for i in $(seq 1 30); do
+                if curl -fsSL http://127.0.0.1:8080/api/v2/app/version >/dev/null 2>&1; then
+                  break
+                fi
+                if ! kill -0 "$QBT_PID" 2>/dev/null; then
+                  echo "❌ qBittorrent 启动失败"
+                  cat /tmp/qbt.log || true
+                  exit 1
+                fi
+                sleep 1
+              done
+              if ! curl -fsSL http://127.0.0.1:8080/api/v2/app/version >/dev/null 2>&1; then
+                echo "❌ qBittorrent Web API 未启动"
+                cat /tmp/qbt.log || true
+                exit 1
+              fi
               TEMP_PASSWORD=$(grep -i "temporary password" /tmp/qbt.log | tail -1 | sed -E 's/.*temporary password[^:]*:[[:space:]]*([^[:space:]]+).*/\1/' || true)
               QBT_PASSWORD="${TEMP_PASSWORD:-adminadmin}"
               curl -fsSL -c /tmp/qbt.cookie -d "username=admin&password=${QBT_PASSWORD}" http://127.0.0.1:8080/api/v2/auth/login >/dev/null
