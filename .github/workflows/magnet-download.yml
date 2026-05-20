@@ -8,6 +8,8 @@ jobs:
   download-and-upload:
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
       - name: Checkout
@@ -21,7 +23,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
 
       - name: Install npm packages
         run: npm install axios

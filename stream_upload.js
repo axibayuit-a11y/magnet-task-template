@@ -9,7 +9,7 @@
 
 const VERSION = '1.3';
 
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
@@ -122,12 +122,9 @@ async function startQBittorrent(downloadDir) {
     fs.mkdirSync(qbtProfileDir, { recursive: true });
 
     // qBittorrent-nox 在 GitHub Actions 里作为本地 Web API 服务运行。
+    const qbtArgs = buildQBittorrentArgs(qbtProfileDir);
     let startupLog = '';
-    const qbt = spawn('qbittorrent-nox', [
-        '--confirm-legal-notice',
-        '--webui-port=8080',
-        '--profile=' + qbtProfileDir
-    ], {
+    const qbt = spawn('qbittorrent-nox', qbtArgs, {
         env: {
             ...process.env,
             HOME: process.cwd()
@@ -161,6 +158,35 @@ async function startQBittorrent(downloadDir) {
     }), { rawBody: true });
 
     return qbt;
+}
+
+function buildQBittorrentArgs(qbtProfileDir) {
+    const args = [
+        '--webui-port=8080',
+        '--profile=' + qbtProfileDir
+    ];
+
+    // 不同 Ubuntu 源里的 qBittorrent 参数不完全一致：
+    // 新版才支持 --confirm-legal-notice，旧版带上会直接退出。
+    if (isQBittorrentArgSupported('--confirm-legal-notice')) {
+        args.unshift('--confirm-legal-notice');
+    }
+
+    return args;
+}
+
+function isQBittorrentArgSupported(argName) {
+    try {
+        const result = spawnSync('qbittorrent-nox', ['-h'], {
+            encoding: 'utf8',
+            timeout: 10000
+        });
+        const helpText = `${result.stdout || ''}\n${result.stderr || ''}`;
+        return helpText.includes(argName);
+    } catch (error) {
+        console.warn('Unable to inspect qBittorrent options:', error.message);
+        return false;
+    }
 }
 
 async function waitForQBittorrent() {
