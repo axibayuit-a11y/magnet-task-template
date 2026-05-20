@@ -10,6 +10,7 @@
 const VERSION = '1.4';
 
 const { spawn, spawnSync } = require('child_process');
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
@@ -122,13 +123,12 @@ async function startQBittorrent(downloadDir) {
     fs.mkdirSync(qbtProfileDir, { recursive: true });
     writeQBittorrentProfileConfig(qbtProfileDir, downloadDir);
 
-    // qBittorrent release AppImage 在 GitHub Actions 里作为本地 Web API 服务运行。
+    // qBittorrent-nox 是官方无界面客户端，脚本通过本地 Web API 控制下载状态。
     const qbtLaunch = buildQBittorrentLaunch(qbtProfileDir);
     let startupLog = '';
     const qbt = spawn(qbtLaunch.command, qbtLaunch.args, {
         env: {
             ...process.env,
-            APPIMAGE_EXTRACT_AND_RUN: process.env.APPIMAGE_EXTRACT_AND_RUN || '1',
             HOME: process.cwd()
         }
     });
@@ -166,9 +166,10 @@ function writeQBittorrentProfileConfig(qbtProfileDir, downloadDir) {
     const configDir = path.join(qbtProfileDir, 'qBittorrent', 'config');
     fs.mkdirSync(configDir, { recursive: true });
 
-    // AppImage 是桌面版程序，显式打开 WebUI，避免依赖旧配置或默认值。
+    // 新版 qBittorrent 要求 WebUI 账号密码预先存在，否则会拒绝启动。
     const savePath = path.resolve(downloadDir).replace(/\\/g, '/');
     const configPath = path.join(configDir, 'qBittorrent.conf');
+    const passwordHash = createQBittorrentPasswordHash(QBT_PASSWORD);
     fs.writeFileSync(configPath, [
         '[LegalNotice]',
         'Accepted=true',
@@ -176,36 +177,44 @@ function writeQBittorrentProfileConfig(qbtProfileDir, downloadDir) {
         '[Preferences]',
         'WebUI\\Enabled=true',
         'WebUI\\Port=8080',
+        `WebUI\\Username=${QBT_USERNAME}`,
+        `WebUI\\Password_PBKDF2="${passwordHash}"`,
+        'WebUI\\LocalHostAuth=false',
         `Downloads\\SavePath=${savePath}`,
         ''
     ].join('\n'));
 }
 
+function createQBittorrentPasswordHash(password) {
+    // qBittorrent 使用 16 字节 salt + PBKDF2-SHA512-100000 次，保存格式为 base64(salt):base64(hash)。
+    const salt = crypto.randomBytes(16);
+    const hash = crypto.pbkdf2Sync(String(password), salt, 100000, 64, 'sha512');
+    return salt.toString('base64') + ':' + hash.toString('base64');
+}
+
 function buildQBittorrentLaunch(qbtProfileDir) {
     const qbtBinary = process.env.QBT_BIN;
     if (!qbtBinary) {
-        throw new Error('QBT_BIN is required. Install the latest qBittorrent release before running this script.');
+        throw new Error('QBT_BIN is required. Install latest qbittorrent-nox before running this script.');
     }
 
+    console.log('qBittorrent binary:', qbtBinary);
+    console.log('qBittorrent version:', getQBittorrentVersion(qbtBinary));
     const qbtArgs = buildQBittorrentArgs(qbtBinary, qbtProfileDir);
-
-    // 官方 Linux release 是 AppImage，需要虚拟显示环境才能在 runner 里启动。
-    if (shouldRunQBittorrentWithXvfb(qbtBinary)) {
-        return {
-            command: 'xvfb-run',
-            args: ['-a', qbtBinary, ...qbtArgs]
-        };
-    }
-
     return {
         command: qbtBinary,
         args: qbtArgs
     };
 }
 
-function shouldRunQBittorrentWithXvfb(qbtBinary) {
-    return process.env.QBT_USE_XVFB === '1'
-        || /\.AppImage$/i.test(qbtBinary);
+function getQBittorrentVersion(qbtBinary) {
+    // 启动前打印版本，避免 Actions 悄悄跑到旧版。
+    const result = spawnSync(qbtBinary, ['--version'], {
+        encoding: 'utf8',
+        timeout: 15000
+    });
+    const text = `${result.stdout || ''}\n${result.stderr || ''}`.trim();
+    return text || 'unknown';
 }
 
 function buildQBittorrentArgs(qbtBinary, qbtProfileDir) {
@@ -224,16 +233,9 @@ function buildQBittorrentArgs(qbtBinary, qbtProfileDir) {
 
 function isQBittorrentArgSupported(qbtBinary, argName) {
     try {
-        const useXvfb = shouldRunQBittorrentWithXvfb(qbtBinary);
-        const command = useXvfb ? 'xvfb-run' : qbtBinary;
-        const args = useXvfb ? ['-a', qbtBinary, '-h'] : ['-h'];
-        const result = spawnSync(command, args, {
+        const result = spawnSync(qbtBinary, ['-h'], {
             encoding: 'utf8',
-            timeout: 15000,
-            env: {
-                ...process.env,
-                APPIMAGE_EXTRACT_AND_RUN: process.env.APPIMAGE_EXTRACT_AND_RUN || '1'
-            }
+            timeout: 15000
         });
         const helpText = `${result.stdout || ''}\n${result.stderr || ''}`;
         return helpText.includes(argName);

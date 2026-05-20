@@ -18,25 +18,21 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends curl jq xvfb libopengl0 libgl1 libegl1 libxkbcommon-x11-0 libxcb-cursor0 libnss3 libdbus-1-3 libfontconfig1 libfreetype6
+          sudo apt-get install -y --no-install-recommends curl jq
 
-      - name: Install Latest qBittorrent Release
+      - name: Install Latest qBittorrent-nox Static
         run: |
           set -e
-          RELEASE_JSON=$(curl -fsSL "https://api.github.com/repos/qbittorrent/qBittorrent/releases/latest")
-          QBT_VERSION=$(echo "$RELEASE_JSON" | jq -r '.tag_name')
-          QBT_URL=$(echo "$RELEASE_JSON" | jq -r '.assets[] | select((.name | endswith("_x86_64.AppImage")) and ((.name | contains("_lt20")) | not)) | .browser_download_url' | head -n 1)
-          if [ -z "$QBT_URL" ]; then
-            echo "No qBittorrent x86_64 AppImage found in latest release"
-            exit 1
-          fi
-          QBT_BIN="$RUNNER_TEMP/qbittorrent.AppImage"
+          DEPS_JSON=$(curl -fsSL "https://github.com/userdocs/qbittorrent-nox-static/releases/latest/download/dependency-version.json")
+          QBT_VERSION=$(echo "$DEPS_JSON" | jq -r '.qbittorrent')
+          LIBTORRENT_VERSION=$(echo "$DEPS_JSON" | jq -r '.libtorrent_2_0')
+          QBT_TAG="release-${QBT_VERSION}_v${LIBTORRENT_VERSION}"
+          QBT_URL="https://github.com/userdocs/qbittorrent-nox-static/releases/download/${QBT_TAG}/x86_64-qbittorrent-nox"
+          QBT_BIN="$RUNNER_TEMP/qbittorrent-nox"
           curl -fL "$QBT_URL" -o "$QBT_BIN"
           chmod +x "$QBT_BIN"
-          echo "qBittorrent release: $QBT_VERSION"
+          "$QBT_BIN" --version
           echo "QBT_BIN=$QBT_BIN" >> "$GITHUB_ENV"
-          echo "QBT_USE_XVFB=1" >> "$GITHUB_ENV"
-          echo "APPIMAGE_EXTRACT_AND_RUN=1" >> "$GITHUB_ENV"
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
