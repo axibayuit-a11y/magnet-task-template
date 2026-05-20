@@ -15,7 +15,7 @@
             echo "📦 安装依赖..."
             sed -i 's/deb.debian.org/mirrors.cloud.tencent.com/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true
             apt-get update
-            apt-get install -y --no-install-recommends ca-certificates curl aria2
+            apt-get install -y --no-install-recommends ca-certificates curl qbittorrent-nox
             update-ca-certificates
             rm -rf /var/lib/apt/lists/*
             echo "✅ 依赖安装完成"
@@ -45,7 +45,7 @@
               if [ -n "$ALL_TRACKERS" ]; then ALL_TRACKERS="$ALL_TRACKERS,$NGOSANG"; else ALL_TRACKERS="$NGOSANG"; fi
             fi
             
-            BACKUP="http://tracker.bt4g.com:2095/announce,udp://tracker.opentrackr.org:1337/announce,udp://open.stealth.si:80/announce"
+            BACKUP="udp://tracker.opentrackr.org:1337/announce,udp://open.stealth.si:80/announce,udp://open.demonii.com:1337/announce,udp://explodie.org:6969/announce,udp://tracker.torrent.eu.org:451/announce,udp://tracker.dler.org:6969/announce,udp://tracker.theoks.net:6969/announce"
             if [ -n "$ALL_TRACKERS" ]; then ALL_TRACKERS="$ALL_TRACKERS,$BACKUP"; else ALL_TRACKERS="$BACKUP"; fi
             
             ALL_TRACKERS=$(echo "$ALL_TRACKERS" | tr ',' '\n' | grep -v '^$' | sort -u | tr '\n' ',' | sed 's/,$//')
@@ -59,8 +59,8 @@
             echo "🚀 开始下载"
             echo "=========================================="
             
-            # 硬编码测试链接 - 电锯人剧场版
-            DOWNLOAD_URL='magnet:?xt=urn:btih:8DBF690F3CC6056A1C0DC0F730BE7DB9B171A634&dn=Chainsaw+Man+The+Movie+Reze+Arc+2025+1080p+AMZN+WEBRip+DUAL+AAC5.1+x265-Jadoo&tr=http%3A%2F%2Fp4p.arenabg.com%3A1337%2Fannounce&tr=udp%3A%2F%2F47.ip-51-68-199.eu%3A6969%2Fannounce&tr=udp%3A%2F%2F9.rarbg.me%3A2780%2Fannounce&tr=udp%3A%2F%2F9.rarbg.to%3A2710%2Fannounce&tr=udp%3A%2F%2F9.rarbg.to%3A2730%2Fannounce&tr=udp%3A%2F%2F9.rarbg.to%3A2920%2Fannounce&tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&tr=udp%3A%2F%2Fopentracker.i2p.rocks%3A6969%2Fannounce&tr=udp%3A%2F%2Ftracker.coppersurfer.tk%3A6969%2Fannounce&tr=udp%3A%2F%2Ftracker.cyberia.is%3A6969%2Fannounce&tr=udp%3A%2F%2Ftracker.dler.org%3A6969%2Fannounce&tr=udp%3A%2F%2Ftracker.internetwarriors.net%3A1337%2Fannounce&tr=udp%3A%2F%2Ftracker.leechers-paradise.org%3A6969%2Fannounce&tr=udp%3A%2F%2Ftracker.openbittorrent.com%3A6969%2Fannounce&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337&tr=udp%3A%2F%2Ftracker.pirateparty.gr%3A6969%2Fannounce&tr=udp%3A%2F%2Ftracker.tiny-vps.com%3A6969%2Fannounce&tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce'
+            # 由调用方传入磁力链接，模板不内置测试资源。
+            DOWNLOAD_URL="${DOWNLOAD_URL:-}"
             
             if [ -z "$DOWNLOAD_URL" ]; then
               echo "❌ DOWNLOAD_URL is required"
@@ -72,30 +72,72 @@
             echo ""
             
             mkdir -p /downloads
-            mkdir -p /root/.cache/aria2
             
             # 判断是磁力链接还是普通 URL
             if echo "$DOWNLOAD_URL" | grep -q "^magnet:"; then
               echo "🧲 检测到磁力链接"
               TRACKERS=$(cat /tmp/trackers.txt 2>/dev/null || echo "")
               
-              # bt-stop-timeout: 600秒(10分钟)无进度自动停止
-              timeout "$((TIMEOUT_MINUTES * 60))s" aria2c "$DOWNLOAD_URL" \
-                --dir=/downloads \
-                --bt-tracker="$TRACKERS" \
-                --bt-max-peers=200 \
-                --max-connection-per-server=16 \
-                --file-allocation=none \
-                --seed-time=0 \
-                --enable-dht=true \
-                --disable-ipv6=true \
-                --bt-enable-lpd=true \
-                --enable-peer-exchange=true \
-                --bt-stop-timeout=600 \
-                --summary-interval=30 \
-                --console-log-level=notice \
-                --human-readable=true \
-                --download-result=full || EXIT_CODE=$?
+              qbittorrent-nox --confirm-legal-notice --webui-port=8080 --profile=/tmp/qbt-profile > /tmp/qbt.log 2>&1 &
+              QBT_PID=$!
+              sleep 8
+              TEMP_PASSWORD=$(grep -i "temporary password" /tmp/qbt.log | tail -1 | sed -E 's/.*temporary password[^:]*:[[:space:]]*([^[:space:]]+).*/\1/' || true)
+              QBT_PASSWORD="${TEMP_PASSWORD:-adminadmin}"
+              curl -fsSL -c /tmp/qbt.cookie -d "username=admin&password=${QBT_PASSWORD}" http://127.0.0.1:8080/api/v2/auth/login >/dev/null
+              curl -fsSL -b /tmp/qbt.cookie -d "json={\"save_path\":\"/downloads\",\"temp_path_enabled\":false,\"start_paused_enabled\":false}" http://127.0.0.1:8080/api/v2/app/setPreferences >/dev/null
+              curl -fsSL -b /tmp/qbt.cookie \
+                --data-urlencode "urls=${DOWNLOAD_URL}" \
+                --data-urlencode "savepath=/downloads" \
+                --data-urlencode "tags=cnb" \
+                --data-urlencode "paused=false" \
+                --data-urlencode "root_folder=true" \
+                http://127.0.0.1:8080/api/v2/torrents/add >/dev/null
+
+              HASH=""
+              START_TS=$(date +%s)
+              LAST_DOWNLOADED=0
+              LAST_PROGRESS_TS=$START_TS
+              while true; do
+                NOW_TS=$(date +%s)
+                if [ $((NOW_TS - START_TS)) -gt $((TIMEOUT_MINUTES * 60)) ]; then
+                  echo "❌ 下载超时"
+                  EXIT_CODE=124
+                  break
+                fi
+
+                INFO=$(curl -fsSL -b /tmp/qbt.cookie "http://127.0.0.1:8080/api/v2/torrents/info?tag=cnb" || echo "[]")
+                HASH=$(node -e "const data=JSON.parse(process.argv[1]||'[]'); console.log(data[0]?.hash||'')" "$INFO")
+                NAME=$(node -e "const data=JSON.parse(process.argv[1]||'[]'); console.log(data[0]?.name||'metadata')" "$INFO")
+                PROGRESS=$(node -e "const data=JSON.parse(process.argv[1]||'[]'); console.log(Math.floor((data[0]?.progress||0)*100))" "$INFO")
+                DOWNLOADED=$(node -e "const data=JSON.parse(process.argv[1]||'[]'); console.log(data[0]?.downloaded||0)" "$INFO")
+                SPEED=$(node -e "const data=JSON.parse(process.argv[1]||'[]'); console.log(data[0]?.dlspeed||0)" "$INFO")
+                STATE=$(node -e "const data=JSON.parse(process.argv[1]||'[]'); console.log(data[0]?.state||'waiting')" "$INFO")
+
+                if [ -n "$HASH" ] && [ -n "$TRACKERS" ]; then
+                  curl -fsSL -b /tmp/qbt.cookie \
+                    --data-urlencode "hash=${HASH}" \
+                    --data-urlencode "urls=$(echo "$TRACKERS" | tr ',' '\n')" \
+                    http://127.0.0.1:8080/api/v2/torrents/addTrackers >/dev/null || true
+                  TRACKERS=""
+                fi
+
+                echo "qBittorrent: ${NAME} ${PROGRESS}% speed=${SPEED} state=${STATE}"
+                if [ "$DOWNLOADED" -gt "$LAST_DOWNLOADED" ] || [ "$SPEED" -gt 0 ]; then
+                  LAST_DOWNLOADED="$DOWNLOADED"
+                  LAST_PROGRESS_TS="$NOW_TS"
+                fi
+                if [ "$PROGRESS" -ge 100 ] || [ "$STATE" = "uploading" ] || [ "$STATE" = "stalledUP" ]; then
+                  EXIT_CODE=0
+                  break
+                fi
+                if [ $((NOW_TS - LAST_PROGRESS_TS)) -gt 600 ]; then
+                  echo "❌ 10分钟无下载进度"
+                  EXIT_CODE=1
+                  break
+                fi
+                sleep 15
+              done
+              kill "$QBT_PID" 2>/dev/null || true
               
               if [ "${EXIT_CODE:-0}" != "0" ]; then
                 echo ""
@@ -106,16 +148,8 @@
               fi
             else
               echo "🔗 检测到普通 URL"
-              timeout "$((TIMEOUT_MINUTES * 60))s" aria2c "$DOWNLOAD_URL" \
-                --dir=/downloads \
-                --max-connection-per-server=16 \
-                --split=16 \
-                --file-allocation=none \
-                --continue=true \
-                --summary-interval=30 \
-                --console-log-level=notice \
-                --human-readable=true \
-                --download-result=full || EXIT_CODE=$?
+              echo "❌ CNB 测试流水线现在只用于磁力链接"
+              EXIT_CODE=2
             fi
             
             echo ""
@@ -130,3 +164,5 @@
             ls -lah /downloads/
             du -sh /downloads/* 2>/dev/null || echo "无文件"
             echo "=========================================="
+
+            exit "${EXIT_CODE:-0}"

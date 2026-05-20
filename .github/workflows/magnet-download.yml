@@ -16,7 +16,7 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y aria2
+          sudo apt-get install -y qbittorrent-nox
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -42,7 +42,7 @@ jobs:
           if [ -n "$NGOSANG" ]; then
             if [ -n "$ALL_TRACKERS" ]; then ALL_TRACKERS="$ALL_TRACKERS,$NGOSANG"; else ALL_TRACKERS="$NGOSANG"; fi
           fi
-          BACKUP="udp://tracker.opentrackr.org:1337/announce,udp://open.stealth.si:80/announce"
+          BACKUP="udp://tracker.opentrackr.org:1337/announce,udp://open.stealth.si:80/announce,udp://open.demonii.com:1337/announce,udp://explodie.org:6969/announce,udp://tracker.torrent.eu.org:451/announce,udp://tracker.dler.org:6969/announce,udp://tracker.theoks.net:6969/announce"
           if [ -n "$ALL_TRACKERS" ]; then ALL_TRACKERS="$ALL_TRACKERS,$BACKUP"; else ALL_TRACKERS="$BACKUP"; fi
           ALL_TRACKERS=$(echo "$ALL_TRACKERS" | tr ',' '\n' | sort -u | tr '\n' ',' | sed 's/,$//')
           echo "TRACKERS=$ALL_TRACKERS" >> $GITHUB_ENV
@@ -60,4 +60,7 @@ jobs:
           TASK_ID: ${{ github.event.client_payload.task_id }}
           TIMEOUT_HOURS: ${{ github.event.client_payload.timeout_hours }}
           BT_TRACKERS: ${{ env.TRACKERS }}
+          QBT_HOST: http://127.0.0.1:8080
+          QBT_USERNAME: admin
+          QBT_PASSWORD: adminadmin
         run: node stream_upload.js
