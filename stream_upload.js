@@ -10,7 +10,6 @@
 const VERSION = '1.4';
 
 const { spawn, spawnSync } = require('child_process');
-const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
@@ -166,10 +165,10 @@ function writeQBittorrentProfileConfig(qbtProfileDir, downloadDir) {
     const configDir = path.join(qbtProfileDir, 'qBittorrent', 'config');
     fs.mkdirSync(configDir, { recursive: true });
 
-    // 新版 qBittorrent 要求 WebUI 账号密码预先存在，否则会拒绝启动。
+    // 只监听本地 Web API，脚本和 qBittorrent 在同一台 runner 内通信。
+    // 本机认证关闭后，不需要维护 WebUI 密码哈希，也不会暴露到公网。
     const savePath = path.resolve(downloadDir).replace(/\\/g, '/');
     const configPath = path.join(configDir, 'qBittorrent.conf');
-    const passwordHash = createQBittorrentPasswordHash(QBT_PASSWORD);
     fs.writeFileSync(configPath, [
         '[LegalNotice]',
         'Accepted=true',
@@ -177,19 +176,12 @@ function writeQBittorrentProfileConfig(qbtProfileDir, downloadDir) {
         '[Preferences]',
         'WebUI\\Enabled=true',
         'WebUI\\Port=8080',
+        'WebUI\\Address=127.0.0.1',
         `WebUI\\Username=${QBT_USERNAME}`,
-        `WebUI\\Password_PBKDF2="${passwordHash}"`,
-        'WebUI\\LocalHostAuth=false',
+        'WebUI\\LocalHostAuth=true',
         `Downloads\\SavePath=${savePath}`,
         ''
     ].join('\n'));
-}
-
-function createQBittorrentPasswordHash(password) {
-    // qBittorrent 使用 16 字节 salt + PBKDF2-SHA512-100000 次，保存格式为 base64(salt):base64(hash)。
-    const salt = crypto.randomBytes(16);
-    const hash = crypto.pbkdf2Sync(String(password), salt, 100000, 64, 'sha512');
-    return salt.toString('base64') + ':' + hash.toString('base64');
 }
 
 function buildQBittorrentLaunch(qbtProfileDir) {
@@ -289,6 +281,15 @@ async function qbtRequest(method, endpoint, data = null, options = {}) {
 async function loginQBittorrent(getStartupLog) {
     const tempPassword = extractTemporaryPassword(getStartupLog());
     const passwords = [tempPassword, QBT_PASSWORD].filter(Boolean);
+
+    try {
+        // LocalHostAuth 开启时，本机 Web API 不需要登录；先探测一次，成功就直接复用这条本机通道。
+        await qbtRequest('GET', '/api/v2/app/preferences');
+        console.log('qBittorrent Web API local access ready');
+        return;
+    } catch (error) {
+        console.log('qBittorrent Web API local access requires login');
+    }
 
     for (const password of passwords) {
         try {
