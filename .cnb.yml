@@ -15,7 +15,7 @@
             echo "📦 安装依赖..."
             sed -i 's/deb.debian.org/mirrors.cloud.tencent.com/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true
             apt-get update
-            apt-get install -y --no-install-recommends ca-certificates curl jq xvfb libgl1 libegl1 libxkbcommon-x11-0 libxcb-cursor0 libnss3 libdbus-1-3 libfontconfig1 libfreetype6
+            apt-get install -y --no-install-recommends ca-certificates curl jq xvfb libopengl0 libgl1 libegl1 libxkbcommon-x11-0 libxcb-cursor0 libnss3 libdbus-1-3 libfontconfig1 libfreetype6
             update-ca-certificates
             rm -rf /var/lib/apt/lists/*
             echo "✅ 依赖安装完成"
