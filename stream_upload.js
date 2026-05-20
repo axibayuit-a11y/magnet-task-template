@@ -178,7 +178,7 @@ function writeQBittorrentProfileConfig(qbtProfileDir, downloadDir) {
         'WebUI\\Port=8080',
         'WebUI\\Address=127.0.0.1',
         `WebUI\\Username=${QBT_USERNAME}`,
-        'WebUI\\LocalHostAuth=true',
+        'WebUI\\LocalHostAuth=false',
         `Downloads\\SavePath=${savePath}`,
         ''
     ].join('\n'));
