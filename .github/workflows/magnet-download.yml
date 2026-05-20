@@ -13,15 +13,33 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y qbittorrent-nox
+          sudo apt-get install -y --no-install-recommends curl jq xvfb libgl1 libegl1 libxkbcommon-x11-0 libxcb-cursor0 libnss3 libdbus-1-3 libfontconfig1 libfreetype6
+
+      - name: Install Latest qBittorrent Release
+        run: |
+          set -e
+          RELEASE_JSON=$(curl -fsSL "https://api.github.com/repos/qbittorrent/qBittorrent/releases/latest")
+          QBT_VERSION=$(echo "$RELEASE_JSON" | jq -r '.tag_name')
+          QBT_URL=$(echo "$RELEASE_JSON" | jq -r '.assets[] | select((.name | endswith("_x86_64.AppImage")) and ((.name | contains("_lt20")) | not)) | .browser_download_url' | head -n 1)
+          if [ -z "$QBT_URL" ]; then
+            echo "No qBittorrent x86_64 AppImage found in latest release"
+            exit 1
+          fi
+          QBT_BIN="$RUNNER_TEMP/qbittorrent.AppImage"
+          curl -fL "$QBT_URL" -o "$QBT_BIN"
+          chmod +x "$QBT_BIN"
+          echo "qBittorrent release: $QBT_VERSION"
+          echo "QBT_BIN=$QBT_BIN" >> "$GITHUB_ENV"
+          echo "QBT_USE_XVFB=1" >> "$GITHUB_ENV"
+          echo "APPIMAGE_EXTRACT_AND_RUN=1" >> "$GITHUB_ENV"
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 24
 

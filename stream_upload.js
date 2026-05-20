@@ -1,13 +1,13 @@
 /**
  * stream_upload.js - Magnet Download + OneDrive Upload
- * Version: 1.3
+ * Version: 1.4
  * 
  * Strategy:
  * - qBittorrent handles magnet metadata and download
  * - Files are uploaded to OneDrive after download
  */
 
-const VERSION = '1.3';
+const VERSION = '1.4';
 
 const { spawn, spawnSync } = require('child_process');
 const fs = require('fs');
@@ -120,13 +120,15 @@ function getAllFiles(dirPath, arr = []) {
 async function startQBittorrent(downloadDir) {
     const qbtProfileDir = path.resolve('./qbt-profile');
     fs.mkdirSync(qbtProfileDir, { recursive: true });
+    writeQBittorrentProfileConfig(qbtProfileDir, downloadDir);
 
-    // qBittorrent-nox 在 GitHub Actions 里作为本地 Web API 服务运行。
-    const qbtArgs = buildQBittorrentArgs(qbtProfileDir);
+    // qBittorrent release AppImage 在 GitHub Actions 里作为本地 Web API 服务运行。
+    const qbtLaunch = buildQBittorrentLaunch(qbtProfileDir);
     let startupLog = '';
-    const qbt = spawn('qbittorrent-nox', qbtArgs, {
+    const qbt = spawn(qbtLaunch.command, qbtLaunch.args, {
         env: {
             ...process.env,
+            APPIMAGE_EXTRACT_AND_RUN: process.env.APPIMAGE_EXTRACT_AND_RUN || '1',
             HOME: process.cwd()
         }
     });
@@ -160,26 +162,78 @@ async function startQBittorrent(downloadDir) {
     return qbt;
 }
 
-function buildQBittorrentArgs(qbtProfileDir) {
+function writeQBittorrentProfileConfig(qbtProfileDir, downloadDir) {
+    const configDir = path.join(qbtProfileDir, 'qBittorrent', 'config');
+    fs.mkdirSync(configDir, { recursive: true });
+
+    // AppImage 是桌面版程序，显式打开 WebUI，避免依赖旧配置或默认值。
+    const savePath = path.resolve(downloadDir).replace(/\\/g, '/');
+    const configPath = path.join(configDir, 'qBittorrent.conf');
+    fs.writeFileSync(configPath, [
+        '[LegalNotice]',
+        'Accepted=true',
+        '',
+        '[Preferences]',
+        'WebUI\\Enabled=true',
+        'WebUI\\Port=8080',
+        `Downloads\\SavePath=${savePath}`,
+        ''
+    ].join('\n'));
+}
+
+function buildQBittorrentLaunch(qbtProfileDir) {
+    const qbtBinary = process.env.QBT_BIN;
+    if (!qbtBinary) {
+        throw new Error('QBT_BIN is required. Install the latest qBittorrent release before running this script.');
+    }
+
+    const qbtArgs = buildQBittorrentArgs(qbtBinary, qbtProfileDir);
+
+    // 官方 Linux release 是 AppImage，需要虚拟显示环境才能在 runner 里启动。
+    if (shouldRunQBittorrentWithXvfb(qbtBinary)) {
+        return {
+            command: 'xvfb-run',
+            args: ['-a', qbtBinary, ...qbtArgs]
+        };
+    }
+
+    return {
+        command: qbtBinary,
+        args: qbtArgs
+    };
+}
+
+function shouldRunQBittorrentWithXvfb(qbtBinary) {
+    return process.env.QBT_USE_XVFB === '1'
+        || /\.AppImage$/i.test(qbtBinary);
+}
+
+function buildQBittorrentArgs(qbtBinary, qbtProfileDir) {
     const args = [
         '--webui-port=8080',
         '--profile=' + qbtProfileDir
     ];
 
-    // 不同 Ubuntu 源里的 qBittorrent 参数不完全一致：
-    // 新版才支持 --confirm-legal-notice，旧版带上会直接退出。
-    if (isQBittorrentArgSupported('--confirm-legal-notice')) {
+    // 不同 release 参数不完全一致：支持才传，避免启动阶段直接退出。
+    if (isQBittorrentArgSupported(qbtBinary, '--confirm-legal-notice')) {
         args.unshift('--confirm-legal-notice');
     }
 
     return args;
 }
 
-function isQBittorrentArgSupported(argName) {
+function isQBittorrentArgSupported(qbtBinary, argName) {
     try {
-        const result = spawnSync('qbittorrent-nox', ['-h'], {
+        const useXvfb = shouldRunQBittorrentWithXvfb(qbtBinary);
+        const command = useXvfb ? 'xvfb-run' : qbtBinary;
+        const args = useXvfb ? ['-a', qbtBinary, '-h'] : ['-h'];
+        const result = spawnSync(command, args, {
             encoding: 'utf8',
-            timeout: 10000
+            timeout: 15000,
+            env: {
+                ...process.env,
+                APPIMAGE_EXTRACT_AND_RUN: process.env.APPIMAGE_EXTRACT_AND_RUN || '1'
+            }
         });
         const helpText = `${result.stdout || ''}\n${result.stderr || ''}`;
         return helpText.includes(argName);
