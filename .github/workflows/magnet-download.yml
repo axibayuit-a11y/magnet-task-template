@@ -1,4 +1,4 @@
-name: Magnet To OneDrive
+name: Magnet To Cloud Drive
 
 on:
   repository_dispatch:
@@ -66,11 +66,16 @@ jobs:
       - name: Run Download Script
         env:
           MAGNET: ${{ github.event.client_payload.magnet }}
+          STORAGE_CHANNEL: ${{ github.event.client_payload.storage_channel }}
           OD_CLIENT_ID: ${{ github.event.client_payload.od_client_id }}
           OD_CLIENT_SECRET: ${{ github.event.client_payload.od_client_secret }}
           OD_TENANT_ID: ${{ github.event.client_payload.od_tenant_id }}
           OD_REFRESH_TOKEN: ${{ github.event.client_payload.od_refresh_token }}
           OD_ROOT_PATH: ${{ github.event.client_payload.od_root_path }}
+          GD_CLIENT_ID: ${{ github.event.client_payload.gd_client_id }}
+          GD_CLIENT_SECRET: ${{ github.event.client_payload.gd_client_secret }}
+          GD_REFRESH_TOKEN: ${{ github.event.client_payload.gd_refresh_token }}
+          GD_ROOT_PATH: ${{ github.event.client_payload.gd_root_path }}
           UPLOAD_FOLDER: ${{ github.event.client_payload.upload_folder }}
           CALLBACK_URL: ${{ github.event.client_payload.callback_url }}
           TASK_ID: ${{ github.event.client_payload.task_id }}

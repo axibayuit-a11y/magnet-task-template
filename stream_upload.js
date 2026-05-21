@@ -1,13 +1,13 @@
 /**
- * stream_upload.js - Magnet Download + OneDrive Upload
- * Version: 1.5
+ * stream_upload.js - Magnet Download + Cloud Drive Upload
+ * Version: 1.6
  * 
  * Strategy:
  * - qBittorrent handles magnet metadata and download
- * - Files are uploaded to OneDrive after download
+ * - Files are uploaded to the selected cloud drive after download
  */
 
-const VERSION = '1.5';
+const VERSION = '1.6';
 
 const { spawn, spawnSync } = require('child_process');
 const fs = require('fs');
@@ -23,11 +23,8 @@ let qbtCookie = '';
 
 async function main() {
     const magnet = process.env.MAGNET;
-    const clientId = process.env.OD_CLIENT_ID;
-    const clientSecret = process.env.OD_CLIENT_SECRET;
-    const tenantId = process.env.OD_TENANT_ID;
-    const refreshToken = process.env.OD_REFRESH_TOKEN;
-    const rootPath = process.env.OD_ROOT_PATH || 'imgbed';
+    const storageChannel = normalizeStorageChannel(process.env.STORAGE_CHANNEL);
+    const storageLabel = getStorageChannelLabel(storageChannel);
     const callbackUrl = process.env.CALLBACK_URL;
     const taskId = process.env.TASK_ID;
     const uploadFolder = process.env.UPLOAD_FOLDER || '';
@@ -43,8 +40,8 @@ async function main() {
     console.log('Max Time:', maxTimeHours, 'hours');
     console.log('Stall Timeout:', stallTimeoutMinutes, 'minutes');
 
-    const accessToken = await refreshAccessToken(clientId, clientSecret, tenantId, refreshToken);
-    console.log('OneDrive token refreshed');
+    const cloudAuth = await refreshCloudAccessToken(storageChannel);
+    console.log(storageLabel + ' token refreshed');
 
     const downloadDir = './downloads';
     fs.mkdirSync(downloadDir, { recursive: true });
@@ -64,7 +61,7 @@ async function main() {
     console.log('Upload folder:', uploadFolder || '(root)');
     console.log('Mode: qBittorrent');
 
-    // 构建 OneDrive 上传基础路径：rootPath/uploadFolder/dateFolder
+    // 构建云盘上传基础路径：rootPath/uploadFolder/dateFolder
     // 磁力内容会保持原有结构追加在后面
     const now = new Date();
     const dateFolder = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}`;
@@ -72,16 +69,23 @@ async function main() {
     // 清理 uploadFolder 的前后斜杠
     const cleanUploadFolder = (uploadFolder || '').replace(/^\/+/, '').replace(/\/+$/, '');
     
-    // OneDrive 路径：rootPath/uploadFolder/dateFolder/[磁力原有结构]
-    const onedrivePath = [rootPath, cleanUploadFolder, dateFolder].filter(p => p).join('/');
+    // 云盘路径：rootPath/uploadFolder/dateFolder/[磁力原有结构]
+    const remoteBasePath = [cloudAuth.rootPath, cleanUploadFolder, dateFolder].filter(p => p).join('/');
     // 图床 KV 路径：uploadFolder/[磁力原有结构]（不含 rootPath 和 dateFolder）
     const kvBasePath = cleanUploadFolder;
     
-    console.log('OneDrive base path:', onedrivePath);
+    console.log(storageLabel + ' base path:', remoteBasePath);
     console.log('KV base path:', kvBasePath || '(root)');
 
     const reportProgress = createProgressReporter(progressUrl, taskId);
-    const uploadedFiles = await uploadDownloadedFiles(downloadDir, accessToken, onedrivePath, kvBasePath, reportProgress);
+    const uploadedFiles = await uploadDownloadedFiles({
+        storageChannel,
+        downloadDir,
+        accessToken: cloudAuth.accessToken,
+        remoteBasePath,
+        kvBasePath,
+        reportProgress
+    });
 
     if (callbackUrl) {
         try {
@@ -93,8 +97,9 @@ async function main() {
                 files: uploadedFiles.map(f => ({
                     fileName: f.name,        // 文件名
                     fileSize: f.size,
+                    storageChannel: f.storageChannel,
                     itemId: f.itemId || '',
-                    onedrivePath: f.onedrivePath || '',  // OneDrive 完整路径
+                    remotePath: f.remotePath || '',      // 云盘完整路径
                     kvPath: f.kvPath || ''               // 图床 KV 的 fileId
                 }))
             });
@@ -106,6 +111,41 @@ async function main() {
     }
 
     console.log('All done!');
+}
+
+function normalizeStorageChannel(channel) {
+    const normalized = String(channel || '').trim().toLowerCase();
+    if (normalized === 'onedrive' || normalized === 'googledrive') {
+        return normalized;
+    }
+    throw new Error('Unsupported STORAGE_CHANNEL: ' + (channel || '(empty)'));
+}
+
+function getStorageChannelLabel(storageChannel) {
+    return storageChannel === 'googledrive' ? 'Google Drive' : 'OneDrive';
+}
+
+async function refreshCloudAccessToken(storageChannel) {
+    if (storageChannel === 'googledrive') {
+        return {
+            accessToken: await refreshGoogleAccessToken(
+                process.env.GD_CLIENT_ID,
+                process.env.GD_CLIENT_SECRET,
+                process.env.GD_REFRESH_TOKEN
+            ),
+            rootPath: process.env.GD_ROOT_PATH || 'imgbed'
+        };
+    }
+
+    return {
+        accessToken: await refreshOneDriveAccessToken(
+            process.env.OD_CLIENT_ID,
+            process.env.OD_CLIENT_SECRET,
+            process.env.OD_TENANT_ID,
+            process.env.OD_REFRESH_TOKEN
+        ),
+        rootPath: process.env.OD_ROOT_PATH || 'imgbed'
+    };
 }
 
 function getAllFiles(dirPath, arr = []) {
@@ -426,7 +466,7 @@ async function getDownloadedFileList(downloadDir) {
     }));
 }
 
-async function uploadDownloadedFiles(downloadDir, accessToken, onedrivePath, kvBasePath, reportProgress) {
+async function uploadDownloadedFiles({ storageChannel, downloadDir, accessToken, remoteBasePath, kvBasePath, reportProgress }) {
     console.log('Download complete, uploading...');
     if (reportProgress) {
         reportProgress({ phase: 'uploading', progress: '下载完成，开始上传...', percent: 0 });
@@ -458,12 +498,15 @@ async function uploadDownloadedFiles(downloadDir, accessToken, onedrivePath, kvB
             });
         }
 
-        const uploadResult = await uploadToOneDrive(file, relativePath, fileStats.size, accessToken, onedrivePath, allFiles.length === 1 ? reportProgress : null);
+        const uploadResult = storageChannel === 'googledrive'
+            ? await uploadToGoogleDrive(file, relativePath, fileStats.size, accessToken, remoteBasePath, allFiles.length === 1 ? reportProgress : null)
+            : await uploadToOneDrive(file, relativePath, fileStats.size, accessToken, remoteBasePath, allFiles.length === 1 ? reportProgress : null);
         uploadedFiles.push({
             name: displayFileName,
             size: fileStats.size,
+            storageChannel,
             itemId: uploadResult.itemId,
-            onedrivePath: uploadResult.path,
+            remotePath: uploadResult.path,
             kvPath: fileKvPath
         });
     }
@@ -489,7 +532,7 @@ async function uploadToOneDrive(filePath, fileName, fileSize, accessToken, baseP
         return { itemId: response.data.id, path: fullPath };
     } else {
         // 大文件分片上传
-        const session = await createUploadSession(accessToken, basePath, safeName);
+        const session = await createOneDriveUploadSession(accessToken, basePath, safeName);
         let uploaded = 0;
         let lastResponse = null;
         let lastReportedPercent = 0;
@@ -513,7 +556,55 @@ async function uploadToOneDrive(filePath, fileName, fileSize, accessToken, baseP
     }
 }
 
-async function createUploadSession(accessToken, basePath, fileName) {
+async function uploadToGoogleDrive(filePath, fileName, fileSize, accessToken, basePath, reportProgress = null) {
+    const safeName = fileName.replace(/\\/g, '/');
+    const pathParts = safeName.split('/').filter(Boolean);
+    const actualFileName = pathParts.pop() || path.basename(filePath);
+    const folderPath = [basePath, ...pathParts].filter(p => p).join('/');
+    const parentId = await ensureGoogleDrivePath(accessToken, folderPath);
+    if (fileSize === 0) {
+        const response = await axios.post('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,size,mimeType', createGoogleDriveMultipartBody(parentId, actualFileName, Buffer.alloc(0)), {
+            headers: {
+                Authorization: 'Bearer ' + accessToken,
+                'Content-Type': 'multipart/related; boundary=' + GOOGLE_DRIVE_MULTIPART_BOUNDARY
+            },
+            maxBodyLength: Infinity,
+            maxContentLength: Infinity
+        });
+        return {
+            itemId: response.data?.id || '',
+            path: [basePath, safeName].filter(p => p).join('/')
+        };
+    }
+
+    const sessionUrl = await createGoogleDriveUploadSession(accessToken, parentId, actualFileName, fileSize);
+
+    let uploaded = 0;
+    let lastResponse = null;
+    while (uploaded < fileSize) {
+        const end = Math.min(uploaded + CHUNK_SIZE, fileSize);
+        lastResponse = await uploadGoogleDriveChunk(sessionUrl, filePath, uploaded, end, fileSize);
+        uploaded = end;
+        const percent = Math.round((uploaded / fileSize) * 100);
+        if (uploaded % (100 * 1024 * 1024) < CHUNK_SIZE) {
+            console.log('Progress:', (uploaded / 1024 / 1024).toFixed(0), 'MB');
+        }
+        if (reportProgress) {
+            reportProgress({
+                phase: 'uploading',
+                progress: `上传中 ${(uploaded / 1024 / 1024).toFixed(0)}MB / ${(fileSize / 1024 / 1024).toFixed(0)}MB`,
+                percent
+            });
+        }
+    }
+
+    return {
+        itemId: lastResponse?.id || '',
+        path: [basePath, safeName].filter(p => p).join('/')
+    };
+}
+
+async function createOneDriveUploadSession(accessToken, basePath, fileName) {
     const safeName = fileName.replace(/\\/g, '/');
     const response = await axios.post('https://graph.microsoft.com/v1.0/me/drive/root:/' + basePath + '/' + safeName + ':/createUploadSession', { item: { '@microsoft.graph.conflictBehavior': 'rename' } }, { headers: { 'Authorization': 'Bearer ' + accessToken } });
     return response.data;
@@ -528,9 +619,116 @@ async function uploadChunk(uploadUrl, filePath, start, end, totalSize) {
     return response.data; // 返回响应数据，最后一个分片包含文件信息
 }
 
-async function refreshAccessToken(clientId, clientSecret, tenantId, refreshToken) {
+async function refreshOneDriveAccessToken(clientId, clientSecret, tenantId, refreshToken) {
     const response = await axios.post('https://login.microsoftonline.com/' + tenantId + '/oauth2/v2.0/token', new URLSearchParams({ client_id: clientId, client_secret: clientSecret, refresh_token: refreshToken, grant_type: 'refresh_token' }), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
     return response.data.access_token;
+}
+
+async function refreshGoogleAccessToken(clientId, clientSecret, refreshToken) {
+    const response = await axios.post('https://oauth2.googleapis.com/token', new URLSearchParams({
+        client_id: clientId,
+        client_secret: clientSecret,
+        refresh_token: refreshToken,
+        grant_type: 'refresh_token'
+    }), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+    return response.data.access_token;
+}
+
+async function ensureGoogleDrivePath(accessToken, folderPath) {
+    const parts = String(folderPath || '').split('/').map(part => part.trim()).filter(Boolean);
+    let parentId = 'root';
+
+    for (const part of parts) {
+        const existingFolderId = await findGoogleDriveFolder(accessToken, parentId, part);
+        parentId = existingFolderId || await createGoogleDriveFolder(accessToken, parentId, part);
+    }
+
+    return parentId;
+}
+
+async function findGoogleDriveFolder(accessToken, parentId, folderName) {
+    const escapedName = escapeGoogleDriveQueryText(folderName);
+    const escapedParentId = escapeGoogleDriveQueryText(parentId);
+    const query = [
+        `name='${escapedName}'`,
+        `'${escapedParentId}' in parents`,
+        "mimeType='application/vnd.google-apps.folder'",
+        'trashed=false'
+    ].join(' and ');
+    const response = await axios.get('https://www.googleapis.com/drive/v3/files', {
+        headers: { Authorization: 'Bearer ' + accessToken },
+        params: {
+            q: query,
+            fields: 'files(id,name)',
+            spaces: 'drive'
+        }
+    });
+    return response.data?.files?.[0]?.id || '';
+}
+
+async function createGoogleDriveFolder(accessToken, parentId, folderName) {
+    const response = await axios.post('https://www.googleapis.com/drive/v3/files?fields=id,name', {
+        name: folderName,
+        mimeType: 'application/vnd.google-apps.folder',
+        parents: [parentId]
+    }, {
+        headers: {
+            Authorization: 'Bearer ' + accessToken,
+            'Content-Type': 'application/json'
+        }
+    });
+    return response.data.id;
+}
+
+async function createGoogleDriveUploadSession(accessToken, parentId, fileName, fileSize) {
+    const response = await axios.post('https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id,name,size,mimeType', {
+        name: fileName,
+        parents: [parentId]
+    }, {
+        headers: {
+            Authorization: 'Bearer ' + accessToken,
+            'Content-Type': 'application/json; charset=UTF-8',
+            'X-Upload-Content-Type': 'application/octet-stream',
+            'X-Upload-Content-Length': String(fileSize)
+        }
+    });
+    return response.headers.location;
+}
+
+async function uploadGoogleDriveChunk(uploadUrl, filePath, start, end, totalSize) {
+    const fd = fs.openSync(filePath, 'r');
+    const buffer = Buffer.alloc(end - start);
+    fs.readSync(fd, buffer, 0, end - start, start);
+    fs.closeSync(fd);
+    const response = await axios.put(uploadUrl, buffer, {
+        headers: {
+            'Content-Length': end - start,
+            'Content-Range': 'bytes ' + start + '-' + (end - 1) + '/' + totalSize
+        },
+        maxBodyLength: Infinity,
+        maxContentLength: Infinity,
+        validateStatus: status => status === 308 || (status >= 200 && status < 300)
+    });
+    return response.status === 308 ? null : response.data;
+}
+
+function escapeGoogleDriveQueryText(value) {
+    return String(value || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+}
+
+const GOOGLE_DRIVE_MULTIPART_BOUNDARY = 'imgbed_magnet_upload_boundary';
+
+function createGoogleDriveMultipartBody(parentId, fileName, fileBuffer) {
+    const metadata = {
+        name: fileName,
+        parents: [parentId]
+    };
+    return Buffer.concat([
+        Buffer.from(`--${GOOGLE_DRIVE_MULTIPART_BOUNDARY}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n`),
+        Buffer.from(`--${GOOGLE_DRIVE_MULTIPART_BOUNDARY}\r\nContent-Type: application/octet-stream\r\n\r\n`),
+        fileBuffer,
+        Buffer.from(`\r\n--${GOOGLE_DRIVE_MULTIPART_BOUNDARY}--`)
+    ]);
 }
 
 function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
