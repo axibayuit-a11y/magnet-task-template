@@ -1,13 +1,13 @@
 /**
  * stream_upload.js - Magnet Download + OneDrive Upload
- * Version: 1.4
+ * Version: 1.5
  * 
  * Strategy:
  * - qBittorrent handles magnet metadata and download
  * - Files are uploaded to OneDrive after download
  */
 
-const VERSION = '1.4';
+const VERSION = '1.5';
 
 const { spawn, spawnSync } = require('child_process');
 const fs = require('fs');
@@ -362,9 +362,14 @@ async function downloadMagnetWithQBittorrent(qbtProcess, magnet, trackers, downl
             lastProgressTime = Date.now();
         }
 
+        const torrentDisplayName = getTorrentDisplayName(torrent);
+
         if (reportProgress) {
             reportProgress({
                 phase: 'downloading',
+                torrentName: torrentDisplayName,
+                fileName: torrentDisplayName,
+                currentFile: torrentDisplayName,
                 downloaded: formatBytes(downloaded),
                 total: formatBytes(totalSize),
                 speed: formatBytes(speed) + '/s',
@@ -374,7 +379,7 @@ async function downloadMagnetWithQBittorrent(qbtProcess, magnet, trackers, downl
             });
         }
 
-        console.log(`[qBittorrent] ${torrent.name || 'metadata'} ${percent}% ${formatBytes(speed)}/s ${torrent.state || ''}`);
+        console.log(`[qBittorrent] ${torrentDisplayName || 'metadata'} ${percent}% ${formatBytes(speed)}/s ${torrent.state || ''}`);
 
         if (torrent.state === 'error' || torrent.state === 'missingFiles') {
             throw new Error(`qBittorrent download failed: ${torrent.state}`);
@@ -530,10 +535,20 @@ async function refreshAccessToken(clientId, clientSecret, tenantId, refreshToken
 
 function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 
+// qBittorrent 拿到真实元数据前会给哈希或 metadata，占位名不回传给图床。
+function getTorrentDisplayName(torrent) {
+    const name = String(torrent?.name || '').trim();
+    if (!name || name === 'metadata' || /^[a-f0-9]{40}$/i.test(name)) {
+        return '';
+    }
+    return name;
+}
+
 // 创建进度报告器 (带并发控制和重试机制)
 function createProgressReporter(progressUrl, taskId) {
     let lastReportedPercent = -100;
     let lastPhase = '';
+    let lastReportedName = '';
     let isReporting = false;
     let nextReport = null;
     
@@ -553,6 +568,7 @@ function createProgressReporter(progressUrl, taskId) {
             // 只有成功才更新标记
             lastReportedPercent = data.percent || 0;
             lastPhase = data.phase;
+            lastReportedName = getProgressDisplayName(data) || lastReportedName;
         } catch (e) {
             console.error('Progress report failed:', e.message);
             // 失败不更新 lastReportedPercent，下次有机会重试
@@ -572,6 +588,7 @@ function createProgressReporter(progressUrl, taskId) {
         }
 
         const currentPercent = data.percent || 0;
+        const currentName = getProgressDisplayName(data);
         const isUpload = data.phase && data.phase.includes('upload');
         const threshold = isUpload ? 35 : 10;
         
@@ -579,6 +596,7 @@ function createProgressReporter(progressUrl, taskId) {
         const isImportant = 
             data.phase === 'completed' || 
             data.phase === 'metadata' ||
+            (currentName && currentName !== lastReportedName) ||
             data.phase !== lastPhase || 
             (currentPercent - lastReportedPercent >= threshold);
 
@@ -587,6 +605,10 @@ function createProgressReporter(progressUrl, taskId) {
             processQueue();
         }
     };
+}
+
+function getProgressDisplayName(data) {
+    return String(data?.torrentName || data?.fileName || data?.currentFile || '').trim();
 }
 
 function formatBytes(bytes) {
