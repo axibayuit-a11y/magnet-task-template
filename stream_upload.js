@@ -1,13 +1,13 @@
 /**
  * stream_upload.js - Magnet Download + Cloud Drive Upload
- * Version: 1.7
+ * Version: 1.8
  * 
  * Strategy:
  * - qBittorrent handles magnet metadata and download
  * - Files are uploaded to the selected cloud drive after download
  */
 
-const VERSION = '1.7';
+const VERSION = '1.8';
 
 const { spawn, spawnSync } = require('child_process');
 const fs = require('fs');
