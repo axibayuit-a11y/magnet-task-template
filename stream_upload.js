@@ -1,13 +1,13 @@
 /**
  * stream_upload.js - Magnet Download + Cloud Drive Upload
- * Version: 1.6
+ * Version: 1.7
  * 
  * Strategy:
  * - qBittorrent handles magnet metadata and download
  * - Files are uploaded to the selected cloud drive after download
  */
 
-const VERSION = '1.6';
+const VERSION = '1.7';
 
 const { spawn, spawnSync } = require('child_process');
 const fs = require('fs');
@@ -16,6 +16,7 @@ const axios = require('axios');
 
 const CHUNK_SIZE = 30 * 1024 * 1024;
 const POLL_INTERVAL = 5000;
+const MAGNET_CALLBACK_TOKEN_HEADER = 'X-Magnet-Task-Token';
 const QBT_HOST = process.env.QBT_HOST || 'http://127.0.0.1:8080';
 const QBT_USERNAME = process.env.QBT_USERNAME || 'admin';
 const QBT_PASSWORD = process.env.QBT_PASSWORD || 'adminadmin';
@@ -26,6 +27,7 @@ async function main() {
     const storageChannel = normalizeStorageChannel(process.env.STORAGE_CHANNEL);
     const storageLabel = getStorageChannelLabel(storageChannel);
     const callbackUrl = process.env.CALLBACK_URL;
+    const callbackToken = process.env.CALLBACK_TOKEN || '';
     const taskId = process.env.TASK_ID;
     const uploadFolder = process.env.UPLOAD_FOLDER || '';
     const maxTimeHours = parseFloat(process.env.TIMEOUT_HOURS) || 2;
@@ -34,6 +36,9 @@ async function main() {
     
     // 进度回调 URL（与 callback 同域）
     const progressUrl = callbackUrl ? callbackUrl.replace('/callback', '/progress') : '';
+    if (callbackUrl && !callbackToken) {
+        throw new Error('CALLBACK_TOKEN is required for magnet callback');
+    }
 
     console.log('=== Magnet Download Task v' + VERSION + ' ===');
     console.log('Magnet:', magnet?.substring(0, 80) + '...');
@@ -50,7 +55,7 @@ async function main() {
     console.log('qBittorrent started');
 
     console.log('Adding magnet and fetching metadata...');
-    const metadata = await downloadMagnetWithQBittorrent(qbt, magnet, trackers, downloadDir, maxTimeHours * 3600000, stallTimeoutMinutes * 60000, createProgressReporter(progressUrl, taskId));
+    const metadata = await downloadMagnetWithQBittorrent(qbt, magnet, trackers, downloadDir, maxTimeHours * 3600000, stallTimeoutMinutes * 60000, createProgressReporter(progressUrl, taskId, callbackToken));
     const totalSize = metadata.totalSize;
     const torrentName = metadata.fileName;
     const fileCount = metadata.fileCount || 1;
@@ -77,7 +82,7 @@ async function main() {
     console.log(storageLabel + ' base path:', remoteBasePath);
     console.log('KV base path:', kvBasePath || '(root)');
 
-    const reportProgress = createProgressReporter(progressUrl, taskId);
+    const reportProgress = createProgressReporter(progressUrl, taskId, callbackToken);
     const uploadedFiles = await uploadDownloadedFiles({
         storageChannel,
         downloadDir,
@@ -102,7 +107,7 @@ async function main() {
                     remotePath: f.remotePath || '',      // 云盘完整路径
                     kvPath: f.kvPath || ''               // 图床 KV 的 fileId
                 }))
-            });
+            }, buildCallbackRequestConfig(callbackToken));
             console.log('Callback sent');
         } catch (e) {
             console.error('Callback failed:', e.message);
@@ -123,6 +128,17 @@ function normalizeStorageChannel(channel) {
 
 function getStorageChannelLabel(storageChannel) {
     return storageChannel === 'googledrive' ? 'Google Drive' : 'OneDrive';
+}
+
+function buildCallbackRequestConfig(callbackToken, options = {}) {
+    // 回写图床后台时统一带任务令牌，后台按 taskId + token 校验这次外部回调。
+    return {
+        ...options,
+        headers: {
+            ...(options.headers || {}),
+            [MAGNET_CALLBACK_TOKEN_HEADER]: callbackToken
+        }
+    };
 }
 
 async function refreshCloudAccessToken(storageChannel) {
@@ -743,7 +759,7 @@ function getTorrentDisplayName(torrent) {
 }
 
 // 创建进度报告器 (带并发控制和重试机制)
-function createProgressReporter(progressUrl, taskId) {
+function createProgressReporter(progressUrl, taskId, callbackToken) {
     let lastReportedPercent = -100;
     let lastPhase = '';
     let lastReportedName = '';
@@ -760,7 +776,7 @@ function createProgressReporter(progressUrl, taskId) {
         
         try {
             console.log(`Reporting progress (${data.phase}): ${data.percent}%`);
-            await axios.post(progressUrl, { taskId, ...data }, { timeout: 10000 }); // 增加超时到10s
+            await axios.post(progressUrl, { taskId, ...data }, buildCallbackRequestConfig(callbackToken, { timeout: 10000 })); // 增加超时到10s
             console.log('Progress reported successfully');
             
             // 只有成功才更新标记

@@ -78,6 +78,7 @@ jobs:
           GD_ROOT_PATH: ${{ github.event.client_payload.gd_root_path }}
           UPLOAD_FOLDER: ${{ github.event.client_payload.upload_folder }}
           CALLBACK_URL: ${{ github.event.client_payload.callback_url }}
+          CALLBACK_TOKEN: ${{ github.event.client_payload.callback_token }}
           TASK_ID: ${{ github.event.client_payload.task_id }}
           TIMEOUT_HOURS: ${{ github.event.client_payload.timeout_hours }}
           BT_TRACKERS: ${{ env.TRACKERS }}
